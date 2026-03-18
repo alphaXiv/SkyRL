@@ -37,6 +37,8 @@ from skyrl.train.generators.utils import (
     get_rollout_metrics,
 )
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
+from skyrl_gym.tools.llm_client import ExternalSubLLMClient
+from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
 
 
 @dataclass
@@ -217,6 +219,33 @@ class SkyRLGymGenerator(GeneratorInterface):
             return await loop.run_in_executor(executor, func, *args, **kwargs)
         else:
             return func(*args, **kwargs)
+
+    # -------------------------------------------------------------------------
+    # RLM: frozen sub-LLM query injection
+    # -------------------------------------------------------------------------
+
+    def _prepare_rlm_extras(self, env_extras: Dict[str, Any]) -> None:
+        """Inject a frozen llm_query_fn into env_extras for RLM environments.
+
+        The sub-LLM is always an external frozen model (no gradients). Its
+        responses are treated as environment observations, not trainable
+        generations.
+        """
+        rlm_config = getattr(self.skyrl_gym_cfg, "rlm", None)
+        if rlm_config is None:
+            return
+        if hasattr(rlm_config, "__dict__"):
+            rlm_config = vars(rlm_config)
+
+        sub_model = rlm_config.get("sub_model_name")
+        if not sub_model:
+            return
+
+        sub_url = rlm_config.get("sub_model_url")
+        sub_api_key = rlm_config.get("sub_model_api_key")
+
+        client = ExternalSubLLMClient(base_url=sub_url, model=sub_model, api_key=sub_api_key)
+        env_extras["llm_query_fn"] = client.query
 
     async def agent_loop(
         self,
@@ -747,6 +776,10 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         if self.batched:
             return await self.generate_batched(prompts, env_classes, env_extras, max_tokens, sampling_params)
+
+        for i in range(len(prompts)):
+            if env_classes[i] == "rlm":
+                self._prepare_rlm_extras(env_extras[i])
 
         # Async agent loop to generate trajectories in parallel.
         tasks = []

@@ -124,5 +124,9 @@ tx/tinker/alembic/__pycache__/
 *.db-wal
 *.db-shm
 
+# Data / Rollouts / Checkpoints
+/data/
+/tmp/
+
 # Other
 exports/
