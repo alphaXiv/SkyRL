@@ -1,4 +1,5 @@
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -87,12 +88,15 @@ class RLMEnv(BaseTextEnv):
         self.ground_truth = extras["reward_spec"]["ground_truth"]
         self.max_turns = extras.get("max_turns", 10)
 
-        if isinstance(env_config, dict):
-            self.rlm_config = RLMEnvConfig(**{k: v for k, v in env_config.items() if k in RLMEnvConfig.__dataclass_fields__})
-        elif isinstance(env_config, RLMEnvConfig):
+        if isinstance(env_config, RLMEnvConfig):
             self.rlm_config = env_config
+        elif isinstance(env_config, Mapping):
+            self.rlm_config = RLMEnvConfig(**{k: v for k, v in env_config.items() if k in RLMEnvConfig.__dataclass_fields__})
         else:
             self.rlm_config = RLMEnvConfig()
+
+        if extras.get("supplementary_system_prompt"):
+            self.rlm_config.supplementary_system_prompt = extras["supplementary_system_prompt"]
 
         self.llm_query_fn: Optional[Callable] = extras.get("llm_query_fn")
         self.sub_call_count = 0
@@ -256,7 +260,7 @@ class RLMEnv(BaseTextEnv):
                 else:
                     parts.append(f"stdout: \"{stdout}\"")
 
-        parts.append(f"Variables: {self.repl.summarize_namespace()}")
+        # parts.append(f"Variables: {self.repl.summarize_namespace()}")
         return "\n".join(parts)
 
     def _build_metadata(self) -> Dict[str, Any]:

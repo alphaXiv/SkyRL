@@ -186,7 +186,7 @@ def main():
               python scripts/analyze_rollout.py eval.jsonl --offset 3 --max-rollouts 2
         """),
     )
-    parser.add_argument("file", type=Path, nargs="?", default=Path("tmp/rlm-eval/dumped_evals/eval_only/unknown.jsonl"), help="Path to the JSONL file (default: tmp/rlm-eval/dumped_evals/eval_only/unknown.jsonl)")
+    parser.add_argument("file", type=Path, nargs="?", default=Path("/root/SkyRL/tmp/rlm-eval/dumped_evals/eval_only/unknown.jsonl"), help="Path to the JSONL file (default: /root/SkyRL/tmp/rlm-eval/dumped_evals/eval_only/unknown.jsonl)")
     parser.add_argument("--max-rollouts", type=int, default=1, help="Number of rollouts to display (default: 1)")
     parser.add_argument("--offset", type=int, default=0, help="Skip this many rollouts before printing (default: 0)")
     parser.add_argument("--max-response-chars", type=int, default=3000, help="Max chars to show per response (default: 3000)")

@@ -247,6 +247,10 @@ class SkyRLGymGenerator(GeneratorInterface):
         client = ExternalSubLLMClient(base_url=sub_url, model=sub_model, api_key=sub_api_key)
         env_extras["llm_query_fn"] = client.query
 
+        supplementary = rlm_config.get("supplementary_system_prompt")
+        if supplementary:
+            env_extras["supplementary_system_prompt"] = supplementary
+
     async def agent_loop(
         self,
         prompt: ConversationType,
