@@ -26,9 +26,15 @@ class ExternalSubLLMClient:
         self.model = model
 
     def query(self, prompt_str: str, max_tokens: int = 4096) -> str:
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt_str}],
-            max_tokens=max_tokens,
-        )
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt_str}],
+                max_completion_tokens=max_tokens,
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"llm_query failed (model={self.model}, prompt_len={len(prompt_str)}, "
+                f"{type(e).__name__}): {e}"
+            ) from e
         return response.choices[0].message.content

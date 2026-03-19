@@ -244,6 +244,17 @@ class SkyRLGymGenerator(GeneratorInterface):
         sub_url = rlm_config.get("sub_model_url")
         sub_api_key = rlm_config.get("sub_model_api_key")
 
+        if not sub_api_key and not sub_url:
+            import os
+            sub_api_key = os.environ.get("OPENAI_API_KEY")
+            if not sub_api_key:
+                import warnings
+                warnings.warn(
+                    "RLM sub-model requires an API key but OPENAI_API_KEY is not set. "
+                    "Set it in the environment or pass sub_model_api_key in the config.",
+                    stacklevel=2,
+                )
+
         client = ExternalSubLLMClient(base_url=sub_url, model=sub_model, api_key=sub_api_key)
         env_extras["llm_query_fn"] = client.query
 

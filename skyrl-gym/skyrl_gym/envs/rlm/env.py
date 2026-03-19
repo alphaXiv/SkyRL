@@ -251,7 +251,11 @@ class RLMEnv(BaseTextEnv):
         parts = ["[Execution Result]"]
 
         if result.error:
-            parts.append(f"Error: {result.error[:prefix_len]}")
+            err = result.error
+            if len(err) > prefix_len:
+                parts.append(f"Error (last {prefix_len} of {len(err)} chars): ...{err[-prefix_len:]}")
+            else:
+                parts.append(f"Error: {err}")
         else:
             stdout = result.stdout
             if stdout:
@@ -283,6 +287,25 @@ class RLMEnv(BaseTextEnv):
 
 
 if __name__ == "__main__":
+    import argparse
+    from skyrl_gym.tools.llm_client import ExternalSubLLMClient
+
+    parser = argparse.ArgumentParser(description="RLMEnv sandbox")
+    parser.add_argument("--sub-model", default=None, help="Sub-LLM model name (e.g. gpt-4o-mini). Enables llm_query().")
+    parser.add_argument("--sub-model-url", default=None, help="Base URL for sub-LLM (for local vLLM servers)")
+    parser.add_argument("--sub-model-api-key", default=None, help="API key for sub-LLM (defaults to OPENAI_API_KEY)")
+    args = parser.parse_args()
+
+    llm_query_fn = None
+    if args.sub_model:
+        client = ExternalSubLLMClient(
+            base_url=args.sub_model_url,
+            model=args.sub_model,
+            api_key=args.sub_model_api_key,
+        )
+        llm_query_fn = client.query
+        print(f"[sandbox] llm_query() enabled with model={args.sub_model}")
+
     # prompt = direct instructions the model sees in full
     direct_prompt = "What is the capital of France? Extract it from the context."
 
@@ -294,11 +317,12 @@ if __name__ == "__main__":
     )
 
     env = RLMEnv(
-        env_config=RLMEnvConfig(metadata_prefix_length=300, repl_timeout=10.0),
+        env_config=RLMEnvConfig(metadata_prefix_length=300, repl_timeout=30.0),
         extras={
             "reward_spec": {"ground_truth": "Paris"},
             "max_turns": 5,
             "extra_info": {"context_text": context_text},
+            **({"llm_query_fn": llm_query_fn} if llm_query_fn else {}),
         },
     )
 
@@ -321,14 +345,25 @@ if __name__ == "__main__":
     for obs in step_out["observations"]:
         print(f"  [{obs['role']}] {obs['content']}")
 
-    # Turn 2: extract the answer and set Final
-    action_2 = (
-        "I can see the answer.\n\n"
-        '```python\nFinal = "Paris"\n```'
-    )
+    # Turn 2: test llm_query if available, otherwise go straight to answer
+    if llm_query_fn:
+        action_2 = (
+            "Let me use llm_query to extract the answer.\n\n"
+            '```python\nanswer = llm_query("What is the capital city mentioned in this text? '
+            'Return only the city name.\\n\\n" + context)\n'
+            'print(f"llm_query returned: {answer}")\n'
+            "Final = answer.strip()\n```"
+        )
+    else:
+        action_2 = (
+            "I can see the answer.\n\n"
+            '```python\nFinal = "Paris"\n```'
+        )
     step_out = env.step(action_2)
     print("\n=== Turn 2 ===")
     print(f"  Reward: {step_out['reward']}, Done: {step_out['done']}")
+    for obs in step_out["observations"]:
+        print(f"  [{obs['role']}] {obs['content']}")
 
     print("\n=== Metrics ===")
     for k, v in env.get_metrics().items():
