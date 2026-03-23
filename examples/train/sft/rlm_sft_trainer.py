@@ -20,6 +20,7 @@ Usage:
 """
 
 import os
+import shutil
 from pathlib import Path
 
 import ray
@@ -42,7 +43,8 @@ from skyrl.train.utils.tracking import Tracking
 
 MODEL_PATH = "Qwen/Qwen3.5-9B"
 DATASET_NAME = "alphaXiv/rlm-stf-v1"
-EVAL_MD_PATH = Path(__file__).parents[3] / "EVAL.md"
+WORKSPACE_ROOT = Path(__file__).parents[3]
+EVAL_MD_PATH = WORKSPACE_ROOT / "EVAL.md"
 
 
 def get_sft_config() -> SkyRLTrainConfig:
@@ -52,8 +54,11 @@ def get_sft_config() -> SkyRLTrainConfig:
 
     cfg.trainer.policy.model.path = MODEL_PATH
     cfg.trainer.placement.policy_num_gpus_per_node = num_gpus
+    cfg.trainer.placement.colocate_all = False
+    cfg.trainer.placement.colocate_policy_ref = False
+    cfg.trainer.algorithm.use_kl_loss = False
+    cfg.trainer.algorithm.use_kl_in_reward = False
     cfg.trainer.policy.sequence_parallel_size = num_gpus
-    cfg.generator.inference_engine.tensor_parallel_size = 1
     cfg.trainer.logger = os.environ.get("LOGGER", "console")
     cfg.trainer.micro_train_batch_size_per_gpu = int(os.environ.get("MICRO_BATCH_SIZE", "2"))
 
@@ -146,6 +151,9 @@ def main():
     learning_rate = float(os.environ.get("LEARNING_RATE", "1e-5"))
     log_interval = int(os.environ.get("LOG_INTERVAL", "10"))
     sample_interval = int(os.environ.get("SAMPLE_INTERVAL", "50"))
+    checkpoint_interval = int(os.environ.get("CHECKPOINT_INTERVAL", "10"))
+    max_checkpoints = int(os.environ.get("MAX_CHECKPOINTS", "2"))
+    checkpoint_dir = Path(os.environ.get("CHECKPOINT_DIR", str(WORKSPACE_ROOT / "exports" / "checkpoints")))
 
     logger.info(f"Loading tokenizer from {MODEL_PATH}...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
@@ -233,7 +241,26 @@ def main():
                     f.write(f"---\n\n### Step {global_step} | loss={train_loss:.4f}\n\n")
                     f.write(f"```\n{response_text}\n```\n\n")
 
+            if global_step > 0 and global_step % checkpoint_interval == 0:
+                ckpt_path = str(checkpoint_dir / f"step_{global_step}")
+                logger.info(f"Saving checkpoint at step {global_step} to {ckpt_path}")
+                dispatch.save_checkpoint("policy", ckpt_path, tokenizer=tokenizer)
+
+                if max_checkpoints > 0:
+                    existing = sorted(
+                        [d for d in checkpoint_dir.iterdir() if d.is_dir() and d.name.startswith("step_")],
+                        key=lambda p: int(p.name.split("_")[1]),
+                    )
+                    while len(existing) > max_checkpoints:
+                        old = existing.pop(0)
+                        logger.info(f"Removing old checkpoint: {old}")
+                        shutil.rmtree(old)
+
             global_step += 1
+
+    final_ckpt_path = str(checkpoint_dir / "final")
+    logger.info(f"Saving final checkpoint to {final_ckpt_path}")
+    dispatch.save_checkpoint("policy", final_ckpt_path, tokenizer=tokenizer)
 
     logger.info(f"SFT training complete! Samples written to {EVAL_MD_PATH}")
     tracker.finish()
