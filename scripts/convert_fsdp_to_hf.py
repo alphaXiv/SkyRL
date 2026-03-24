@@ -101,6 +101,27 @@ def save_hf_checkpoint(merged: dict[str, torch.Tensor], output_dir: Path, ckpt_d
             shutil.copy2(f, output_dir / f.name)
             print(f"  Copied {f.name}")
 
+    has_lm_head = any("lm_head" in k for k in merged)
+    config_path = output_dir / "config.json"
+    if config_path.exists() and has_lm_head:
+        with open(config_path) as f:
+            config = json.load(f)
+        if "architectures" not in config:
+            model_type = config.get("model_type", "")
+            arch_map = {
+                "qwen3_5": "Qwen3_5ForConditionalGeneration",
+                "qwen3_5_text": "Qwen3_5ForCausalLM",
+                "qwen3": "Qwen3ForCausalLM",
+                "qwen2": "Qwen2ForCausalLM",
+                "llama": "LlamaForCausalLM",
+            }
+            arch = arch_map.get(model_type)
+            if arch:
+                config["architectures"] = [arch]
+                with open(config_path, "w") as f:
+                    json.dump(config, f, indent=2)
+                print(f"  Added architectures: [{arch}] to config.json")
+
     total_bytes = sum(t.nelement() * t.element_size() for t in merged.values())
     total_gb = total_bytes / (1024 ** 3)
     print(f"  Total model size: {total_gb:.2f} GB")

@@ -195,7 +195,7 @@ def main():
         colocate_all=False,
         sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
     )
-    ray.get(actor_group.async_init_model(MODEL_PATH))
+    ray.get(actor_group.async_init_model(MODEL_PATH, freeze_vision_encoder=True))
 
     dispatch = WorkerDispatch(cfg, policy_actor_group=actor_group)
     dispatch.set_lr("policy", learning_rate)
