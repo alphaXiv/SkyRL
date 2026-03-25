@@ -37,8 +37,6 @@ from skyrl.train.generators.utils import (
     get_rollout_metrics,
 )
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
-from skyrl_gym.tools.llm_client import ExternalSubLLMClient
-from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
 
 
 @dataclass
@@ -219,48 +217,6 @@ class SkyRLGymGenerator(GeneratorInterface):
             return await loop.run_in_executor(executor, func, *args, **kwargs)
         else:
             return func(*args, **kwargs)
-
-    # -------------------------------------------------------------------------
-    # RLM: frozen sub-LLM query injection
-    # -------------------------------------------------------------------------
-
-    def _prepare_rlm_extras(self, env_extras: Dict[str, Any]) -> None:
-        """Inject a frozen llm_query_fn into env_extras for RLM environments.
-
-        The sub-LLM is always an external frozen model (no gradients). Its
-        responses are treated as environment observations, not trainable
-        generations.
-        """
-        rlm_config = getattr(self.skyrl_gym_cfg, "rlm", None)
-        if rlm_config is None:
-            return
-        if hasattr(rlm_config, "__dict__"):
-            rlm_config = vars(rlm_config)
-
-        sub_model = rlm_config.get("sub_model_name")
-        if not sub_model:
-            return
-
-        sub_url = rlm_config.get("sub_model_url")
-        sub_api_key = rlm_config.get("sub_model_api_key")
-
-        if not sub_api_key and not sub_url:
-            import os
-            sub_api_key = os.environ.get("OPENAI_API_KEY")
-            if not sub_api_key:
-                import warnings
-                warnings.warn(
-                    "RLM sub-model requires an API key but OPENAI_API_KEY is not set. "
-                    "Set it in the environment or pass sub_model_api_key in the config.",
-                    stacklevel=2,
-                )
-
-        client = ExternalSubLLMClient(base_url=sub_url, model=sub_model, api_key=sub_api_key)
-        env_extras["llm_query_fn"] = client.query
-
-        supplementary = rlm_config.get("supplementary_system_prompt")
-        if supplementary:
-            env_extras["supplementary_system_prompt"] = supplementary
 
     async def agent_loop(
         self,
@@ -794,7 +750,12 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         for i in range(len(prompts)):
             if env_classes[i] == "rlm":
-                self._prepare_rlm_extras(env_extras[i])
+                rlm_config = getattr(self.skyrl_gym_cfg, "rlm", None)
+                if rlm_config is not None:
+                    cfg = vars(rlm_config) if hasattr(rlm_config, "__dict__") else rlm_config
+                    custom_prompt = cfg.get("custom_system_prompt")
+                    if custom_prompt:
+                        env_extras[i]["custom_system_prompt"] = custom_prompt
 
         # Async agent loop to generate trajectories in parallel.
         tasks = []

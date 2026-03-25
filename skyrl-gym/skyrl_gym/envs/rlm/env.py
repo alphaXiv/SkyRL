@@ -1,81 +1,206 @@
+import json
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
 
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput, ConversationType
-from skyrl_gym.tools.repl import PersistentREPL
+from skyrl_gym.tools.repl import PersistentREPL, REPLResult
 
+
+# ---------------------------------------------------------------------------
+# System prompt (official RLM prompt from rlm/rlm/utils/prompts.py)
+# ---------------------------------------------------------------------------
 
 DEFAULT_RLM_SYSTEM_PROMPT = """\
-You are tasked with answering a query with associated context. You can access, \
-transform, and analyze this context interactively in a REPL environment. You \
-will be queried iteratively until you provide a final answer.
-
-Your context is a string with {context_length} total characters.
+You are tasked with answering a query with associated context. You can access, transform, and analyze this context interactively in a REPL environment. You will be queried iteratively until you provide a final answer.
 
 The REPL environment is initialized with:
-1. A `context` variable that contains important information about your query. \
-You should check the content of the context variable to understand what you are \
-working with. Make sure you look through it sufficiently as you answer your query.
-{llm_query_section}\
-3. The ability to use `print()` statements to view the output of your REPL code \
-and continue your reasoning. You will only be able to see truncated outputs from \
-the REPL environment{llm_query_hint}.
-
-Use variables as buffers to build up your final answer. Make sure to explicitly \
-look through the context in the REPL before answering your query.
-
-Respond with Python code wrapped in ```python ... ``` blocks.
-
-IMPORTANT: When you are done, set `Final` to your answer in the REPL:
-```python
-Final = "your answer here"
-```
-or assign a variable you have built up:
-```python
-Final = my_answer_variable
+1. A `context` variable that contains extremely important information about your query. You should check the content of the `context` variable to understand what you are working with. Make sure you look through it sufficiently as you answer your query.
+2. A `SHOW_VARS()` function that returns all variables you have created in the REPL. Use this to check what variables exist before using FINAL_VAR.
+3. The ability to use `print()` statements to view the output of your REPL code and continue your reasoning.
+{custom_tools_section}
+When you want to execute Python code in the REPL environment, wrap it in triple backticks with 'repl' language identifier:
+```repl
+# your code here
 ```
 
-Think step by step carefully, plan, and execute this plan immediately in your \
-response -- do not just say "I will do this". Output to the REPL environment \
-as much as possible. Remember to explicitly answer the original query in your \
-final answer.\
+Use variables as buffers to build up your final answer. Make sure to explicitly look through the context in the REPL before answering your query.
+
+IMPORTANT: When you are done with the iterative process, you MUST provide a final answer using one of:
+1. FINAL(your final answer here) — provide the answer directly as text
+2. FINAL_VAR(variable_name) — return a variable you have created in the REPL
+
+WARNING: FINAL_VAR retrieves an EXISTING variable. You MUST create and assign the variable in a ```repl``` block FIRST, then call FINAL_VAR in a SEPARATE response.
+
+Think step by step carefully, plan, and execute this plan immediately in your response -- do not just say "I will do this". Output to the REPL environment as much as possible.\
 """
 
 
+# ---------------------------------------------------------------------------
+# Per-turn user prompt injection (from rlm/rlm/utils/prompts.py)
+# ---------------------------------------------------------------------------
+
+_USER_PROMPT = (
+    "Think step-by-step on what to do using the REPL environment (which contains the context) "
+    "to answer the prompt.\n\n"
+    "Continue using the REPL environment, which has the `context` variable, "
+    "and determine your answer. Your next action:"
+)
+_USER_PROMPT_WITH_ROOT = (
+    "Think step-by-step on what to do using the REPL environment (which contains the context) "
+    "to answer the original prompt: \"{root_prompt}\".\n\n"
+    "Continue using the REPL environment, which has the `context` variable, "
+    "and determine your answer. Your next action:"
+)
+
+
+def _build_user_prompt(root_prompt: Optional[str], iteration: int) -> Dict[str, str]:
+    """Build the per-turn user message injected before every model call."""
+    if iteration == 0:
+        safeguard = (
+            "You have not interacted with the REPL environment or seen your prompt / context yet. "
+            "Your next action should be to look through and figure out how to answer the prompt, "
+            "so don't just provide a final answer yet.\n\n"
+        )
+        body = _USER_PROMPT_WITH_ROOT.format(root_prompt=root_prompt) if root_prompt else _USER_PROMPT
+        content = safeguard + body
+    else:
+        prefix = "The history before is your previous interactions with the REPL environment. "
+        body = _USER_PROMPT_WITH_ROOT.format(root_prompt=root_prompt) if root_prompt else _USER_PROMPT
+        content = prefix + body
+    return {"role": "user", "content": content}
+
+
+# ---------------------------------------------------------------------------
+# Parsing helpers (from rlm/rlm/utils/parsing.py)
+# ---------------------------------------------------------------------------
+
+_THINK_RE = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL)
+
+
+def _strip_thinking(text: str) -> str:
+    return _THINK_RE.sub("", text).strip()
+
+
+def _find_code_block(text: str) -> Optional[str]:
+    """Return the first ```repl ... ``` code block, or None."""
+    text = _strip_thinking(text)
+    match = re.search(r"```repl\s*\n(.*?)\n```", text, re.DOTALL)
+    return match.group(1).strip() if match else None
+
+
+def _find_final_answer(text: str, repl: Optional[PersistentREPL]) -> Optional[str]:
+    """Parse FINAL_VAR(...) or FINAL(...) from the model's text response."""
+    text = _strip_thinking(text)
+
+    # FINAL_VAR — retrieves a variable from the REPL
+    match = re.search(r"^\s*FINAL_VAR\((.*?)\)", text, re.MULTILINE | re.DOTALL)
+    if match:
+        variable_name = match.group(1).strip().strip('"').strip("'")
+        if repl is not None:
+            result = repl.execute(f"print(FINAL_VAR({variable_name!r}))")
+            answer = result.stdout.strip()
+            if answer == "":
+                return None
+            if "Variable '" in answer and "' not found" in answer and "FINAL_VAR" in answer:
+                return None
+            return answer
+        return None
+
+    # FINAL — inline literal
+    match = re.search(r"^\s*FINAL\((.*)\)\s*$", text, re.MULTILINE | re.DOTALL)
+    if match:
+        return match.group(1).strip()
+
+    return None
+
+
+def _format_execution_result(result: REPLResult) -> str:
+    """Format a REPLResult as a string for display in the conversation (from rlm/rlm/utils/parsing.py)."""
+    parts = []
+    if result.stdout:
+        parts.append(f"\n{result.stdout}")
+    if result.stderr:
+        parts.append(f"\n{result.stderr}")
+    important_vars = {
+        k: ""
+        for k, v in result.locals.items()
+        if not k.startswith("_")
+        and k not in ("__builtins__", "__name__", "__doc__")
+        and isinstance(v, (str, int, float, bool, list, dict, tuple))
+    }
+    if important_vars:
+        parts.append(f"REPL variables: {list(important_vars.keys())}\n")
+    return "\n\n".join(parts) if parts else "No output"
+
+
+_MAX_RESULT_LEN = 20_000
+
+
+# ---------------------------------------------------------------------------
+# QueryMetadata (from rlm/rlm/core/types.py)
+# ---------------------------------------------------------------------------
+
+class _QueryMetadata:
+    def __init__(self, context_payload):
+        if isinstance(context_payload, str):
+            self.context_lengths = [len(context_payload)]
+            self.context_type = "str"
+        elif isinstance(context_payload, dict):
+            self.context_type = "dict"
+            self.context_lengths = []
+            for chunk in context_payload.values():
+                if isinstance(chunk, str):
+                    self.context_lengths.append(len(chunk))
+                else:
+                    try:
+                        self.context_lengths.append(len(json.dumps(chunk, default=str)))
+                    except Exception:
+                        self.context_lengths.append(len(repr(chunk)))
+        elif isinstance(context_payload, list):
+            self.context_type = "list"
+            self.context_lengths = [len(str(c)) for c in context_payload]
+        else:
+            self.context_type = type(context_payload).__name__
+            self.context_lengths = [len(repr(context_payload))]
+        self.context_total_length = sum(self.context_lengths)
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
 @dataclass
 class RLMEnvConfig:
-    metadata_prefix_length: int = 500
     repl_timeout: float = 15.0
-    max_sub_calls_per_episode: int = 20
-    system_prompt: Optional[str] = None
-    supplementary_system_prompt: Optional[str] = None
+    custom_system_prompt: Optional[str] = None
+    custom_tools: Optional[Dict[str, Any]] = field(default=None)
 
+
+# ---------------------------------------------------------------------------
+# Environment
+# ---------------------------------------------------------------------------
 
 class RLMEnv(BaseTextEnv):
     """
     Recursive Language Model environment.
 
-    The model sees three layers at init:
+    init() returns:
+        [system_msg, context_metadata_msg, turn_0_user_prompt_msg]
 
-    1. **System prompt** — default RLM instructions explaining the REPL, the
-       ``context`` variable, ``llm_query()``, and how to set ``Final``.
-       Override via ``RLMEnvConfig.system_prompt``.
+    step() returns observations:
+        [repl_output_msg, turn_N_user_prompt_msg]
 
-    2. **Prompt** (dataset ``prompt`` field) — the user question / task
-       description, shown directly in the model's context window.
+    The model always sees the per-turn user prompt as the last message before
+    it generates, keeping root_prompt visible every turn.
 
-    3. **Context** (``extra_info["context_text"]``) — stored externally in the
-       REPL as the ``context`` variable. The model must run code to read it.
+    Context is loaded into the REPL via a temp file (add_context) so it
+    appears as a genuine REPL variable in SHOW_VARS() and format_execution_result().
 
-    If ``context_text`` is not provided, the prompt content is used as both the
-    direct message *and* the REPL context (backward-compatible behavior).
-
-    The model generates Python code each turn to interact with ``context``,
-    call ``llm_query()`` for sub-RLM delegation, and set ``Final`` when done.
-    Only compact metadata about execution results is returned, keeping the
-    context window manageable.
+    Final answer is detected via:
+      1. REPLResult.final_answer — set when FINAL_VAR() is called inside a repl block
+      2. Text parsing of FINAL(...) / FINAL_VAR(...) in the model's response
     """
 
     def __init__(self, env_config: Any = None, extras: Dict[str, Any] = None):
@@ -95,221 +220,163 @@ class RLMEnv(BaseTextEnv):
         else:
             self.rlm_config = RLMEnvConfig()
 
-        if extras.get("supplementary_system_prompt"):
-            self.rlm_config.supplementary_system_prompt = extras["supplementary_system_prompt"]
+        if extras.get("custom_system_prompt"):
+            self.rlm_config.custom_system_prompt = extras["custom_system_prompt"]
 
-        self.llm_query_fn: Optional[Callable] = extras.get("llm_query_fn")
-        self.sub_call_count = 0
         self.repl: Optional[PersistentREPL] = None
-        self.chat_history: ConversationType = []
-        self._metrics: Dict[str, Any] = {}
+        self._final_answer: Optional[str] = None
+        self._turn_index = 0  # iteration counter for build_user_prompt
 
     def init(self, prompt: ConversationType) -> Tuple[ConversationType, Dict[str, Any]]:
         extra_info = self.extras.get("extra_info", {}) if hasattr(self, "extras") else {}
         if not isinstance(extra_info, dict):
             extra_info = {}
 
-        user_prompt = self._extract_prompt_text(prompt)
+        # root_prompt: the user question shown every turn
+        # context_text: data payload loaded into the REPL `context` variable
+        root_prompt = self._extract_prompt_text(prompt)
+        context_payload = extra_info.get("context_text") or root_prompt
+        self._root_prompt = root_prompt
 
-        # Context text stored in the REPL as `context`.
-        # If extra_info provides context_text, use that; otherwise fall back to
-        # the prompt content (backward compat: prompt serves as both).
-        context_text = extra_info.get("context_text") or user_prompt
-
-        has_llm_query = self.llm_query_fn is not None
-
-        namespace = {"Final": None}
-        namespace["context"] = context_text
-
-        if has_llm_query:
-            call_limit = self.rlm_config.max_sub_calls_per_episode
-
-            def guarded_llm_query(sub_prompt: str, max_tokens: int = 4096) -> str:
-                if self.sub_call_count >= call_limit:
-                    return f"[Error: sub-call limit of {call_limit} reached]"
-                self.sub_call_count += 1
-                return self.llm_query_fn(sub_prompt, max_tokens)
-
-            namespace["llm_query"] = guarded_llm_query
-
-        self.repl = PersistentREPL(namespace=namespace, timeout=self.rlm_config.repl_timeout)
-
-        system_prompt = self._build_system_prompt(
-            context_length=len(context_text),
-            has_llm_query=has_llm_query,
+        self.repl = PersistentREPL(
+            timeout=self.rlm_config.repl_timeout,
+            custom_tools=self.rlm_config.custom_tools or {},
         )
+        self.repl.add_context(context_payload, context_index=0)
+
+        # Compute context metadata for the first user message
+        meta = _QueryMetadata(context_payload)
+        metadata_text = (
+            f"Your context is a {meta.context_type} with {meta.context_total_length} total characters, "
+            f"and is broken up into chunks of char lengths: {meta.context_lengths}."
+        )
+
+        system_content = self._build_system_prompt()
+
+        # Turn-0 user prompt injection
+        self._turn_index = 0
+        turn0_prompt = _build_user_prompt(root_prompt, iteration=0)
 
         init_messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": metadata_text},
+            turn0_prompt,
         ]
-        self.chat_history = list(init_messages)
         return init_messages, {}
 
-    def _build_system_prompt(self, context_length: int, has_llm_query: bool) -> str:
-        template = self.rlm_config.system_prompt or DEFAULT_RLM_SYSTEM_PROMPT
+    def _build_system_prompt(self) -> str:
+        template = self.rlm_config.custom_system_prompt or DEFAULT_RLM_SYSTEM_PROMPT
 
-        if has_llm_query:
-            llm_query_section = (
-                "2. A `llm_query(prompt, max_tokens=4096)` function that allows you "
-                "to query a sub-LLM inside your REPL environment.\n"
-            )
-            llm_query_hint = ", so use `llm_query()` on variables you want to analyze semantically"
-        else:
-            llm_query_section = ""
-            llm_query_hint = ""
+        custom_tools_section = ""
+        if self.rlm_config.custom_tools:
+            from skyrl_gym.tools.repl import _extract_tool_value
+            lines = []
+            for name, entry in self.rlm_config.custom_tools.items():
+                val = _extract_tool_value(entry)
+                desc = entry.get("description", "") if isinstance(entry, dict) else ""
+                if callable(val):
+                    lines.append(f"- `{name}`: {desc}" if desc else f"- `{name}`: A custom function")
+                else:
+                    lines.append(f"- `{name}`: {desc}" if desc else f"- `{name}`: A custom {type(val).__name__} value")
+            custom_tools_section = "\nCustom tools and data available in the REPL:\n" + "\n".join(lines)
 
-        prompt = template.format(
-            context_length=context_length,
-            llm_query_section=llm_query_section,
-            llm_query_hint=llm_query_hint,
-        )
-        if self.rlm_config.supplementary_system_prompt:
-            prompt += "\n\n" + self.rlm_config.supplementary_system_prompt
-        return prompt
+        return template.format(custom_tools_section=custom_tools_section)
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
         self.turns += 1
-        self.chat_history.append({"role": "assistant", "content": action})
+        self._turn_index += 1
 
         done = self.turns >= self.max_turns
-        code = self._extract_code(action)
+        code = _find_code_block(action)
 
         if code is None:
-            obs_text = "[No code block found. Wrap your code in ```python ... ``` blocks.]"
+            obs_text = "[No ```repl``` code block found. Wrap your code in ```repl\\n...\\n``` blocks.]"
             if not done:
-                obs = [{"role": "user", "content": obs_text}]
+                next_prompt = _build_user_prompt(self._root_prompt, self._turn_index)
+                obs = [
+                    {"role": "user", "content": obs_text},
+                    next_prompt,
+                ]
             else:
                 obs = []
-            reward = self._get_reward(done)
-            return BaseTextEnvStepOutput(observations=obs, reward=reward, done=done, metadata={})
+            return BaseTextEnvStepOutput(
+                observations=obs, reward=self._get_reward(done, None), done=done, metadata={}
+            )
 
         result = self.repl.execute(code)
 
-        if self.repl.namespace.get("Final") is not None:
+        # Two-stage final answer detection
+        final_answer = result.final_answer  # set by FINAL_VAR() callable during execution
+        if final_answer is None:
+            final_answer = _find_final_answer(action, self.repl)
+        if final_answer is not None:
+            self._final_answer = final_answer
             done = True
 
-        reward = self._get_reward(done)
+        reward = self._get_reward(done, final_answer)
 
         if done:
-            return BaseTextEnvStepOutput(observations=[], reward=reward, done=True, metadata=self._build_metadata())
+            return BaseTextEnvStepOutput(
+                observations=[], reward=reward, done=True, metadata=self._build_metadata()
+            )
 
-        obs_text = self._format_observation(result)
-        obs = [{"role": "user", "content": obs_text}]
-        self.chat_history.append(obs[0])
-        return BaseTextEnvStepOutput(observations=obs, reward=reward, done=False, metadata=self._build_metadata())
+        # Format REPL output observation
+        result_str = _format_execution_result(result)
+        if len(result_str) > _MAX_RESULT_LEN:
+            result_str = result_str[:_MAX_RESULT_LEN] + f"... + [{len(result_str) - _MAX_RESULT_LEN} chars...]"
+        repl_obs_text = f"Code executed:\n```repl\n{code}\n```\n\nREPL output:\n{result_str}"
+
+        next_prompt = _build_user_prompt(self._root_prompt, self._turn_index)
+        obs = [
+            {"role": "user", "content": repl_obs_text},
+            next_prompt,
+        ]
+        return BaseTextEnvStepOutput(
+            observations=obs, reward=reward, done=False, metadata=self._build_metadata()
+        )
 
     def _extract_prompt_text(self, prompt: ConversationType) -> str:
-        """Extract the raw text content from the prompt messages."""
-        parts = []
-        for msg in prompt:
-            if msg.get("content"):
-                parts.append(msg["content"])
+        parts = [msg["content"] for msg in prompt if msg.get("content")]
         return "\n".join(parts)
 
-    def _extract_code(self, action: str) -> Optional[str]:
-        """Extract Python code from markdown code blocks or <code> tags."""
-        patterns = [
-            r"```python\s*\n(.*?)```",
-            r"```\s*\n(.*?)```",
-            r"<code>(.*?)</code>",
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, action, re.DOTALL)
-            if match:
-                return match.group(1).strip()
-        return None
-
-    def _get_reward(self, done: bool) -> float:
+    def _get_reward(self, done: bool, final_answer: Optional[str]) -> float:
         if not done:
             return 0.0
-
-        final_val = self.repl.namespace.get("Final") if self.repl else None
-        if final_val is None:
+        if final_answer is None:
             return 0.0
 
-        final_str = str(final_val).strip()
+        final_str = str(final_answer).strip()
         gt_str = str(self.ground_truth).strip()
 
         if final_str == gt_str:
             return 1.0
-
         try:
             if abs(float(final_str) - float(gt_str)) < 1e-6:
                 return 1.0
         except (ValueError, TypeError):
             pass
-
         if gt_str.lower() in final_str.lower():
             return 0.5
-
         return 0.0
 
-    def _format_observation(self, result) -> str:
-        """Format REPL result as a compact metadata observation."""
-        prefix_len = self.rlm_config.metadata_prefix_length
-        parts = ["[Execution Result]"]
-
-        if result.error:
-            err = result.error
-            if len(err) > prefix_len:
-                parts.append(f"Error (last {prefix_len} of {len(err)} chars): ...{err[-prefix_len:]}")
-            else:
-                parts.append(f"Error: {err}")
-        else:
-            stdout = result.stdout
-            if stdout:
-                if len(stdout) > prefix_len:
-                    parts.append(f"stdout (first {prefix_len} of {len(stdout)} chars): \"{stdout[:prefix_len]}\"")
-                else:
-                    parts.append(f"stdout: \"{stdout}\"")
-
-        # parts.append(f"Variables: {self.repl.summarize_namespace()}")
-        return "\n".join(parts)
-
     def _build_metadata(self) -> Dict[str, Any]:
-        return {
-            "turns": self.turns,
-            "sub_calls": self.sub_call_count,
-        }
+        return {"turns": self.turns}
 
     def get_metrics(self) -> Dict[str, Any]:
-        final_val = self.repl.namespace.get("Final") if self.repl else None
         return {
             "turns_used": self.turns,
-            "sub_calls_made": self.sub_call_count,
-            "final_value_set": final_val is not None,
-            "reward": self._get_reward(True),
+            "final_value_set": self._final_answer is not None,
+            "reward": self._get_reward(True, self._final_answer),
         }
 
     def close(self):
-        self.repl = None
+        if self.repl is not None:
+            self.repl.cleanup()
+            self.repl = None
 
 
 if __name__ == "__main__":
-    import argparse
-    from skyrl_gym.tools.llm_client import ExternalSubLLMClient
-
-    parser = argparse.ArgumentParser(description="RLMEnv sandbox")
-    parser.add_argument("--sub-model", default=None, help="Sub-LLM model name (e.g. gpt-4o-mini). Enables llm_query().")
-    parser.add_argument("--sub-model-url", default=None, help="Base URL for sub-LLM (for local vLLM servers)")
-    parser.add_argument("--sub-model-api-key", default=None, help="API key for sub-LLM (defaults to OPENAI_API_KEY)")
-    args = parser.parse_args()
-
-    llm_query_fn = None
-    if args.sub_model:
-        client = ExternalSubLLMClient(
-            base_url=args.sub_model_url,
-            model=args.sub_model,
-            api_key=args.sub_model_api_key,
-        )
-        llm_query_fn = client.query
-        print(f"[sandbox] llm_query() enabled with model={args.sub_model}")
-
-    # prompt = direct instructions the model sees in full
     direct_prompt = "What is the capital of France? Extract it from the context."
-
-    # context_text = large text stored externally in the REPL `context` variable
     context_text = (
         "The population of France is approximately 67 million people. "
         "The capital city is Paris. France is known for the Eiffel Tower, "
@@ -317,12 +384,11 @@ if __name__ == "__main__":
     )
 
     env = RLMEnv(
-        env_config=RLMEnvConfig(metadata_prefix_length=300, repl_timeout=30.0),
+        env_config=RLMEnvConfig(repl_timeout=30.0),
         extras={
             "reward_spec": {"ground_truth": "Paris"},
             "max_turns": 5,
             "extra_info": {"context_text": context_text},
-            **({"llm_query_fn": llm_query_fn} if llm_query_fn else {}),
         },
     )
 
@@ -334,36 +400,25 @@ if __name__ == "__main__":
         preview = msg["content"][:300].replace("\n", "\\n")
         print(f"  [{msg['role']}] {preview}...")
 
-    # Turn 1: explore the context variable
     action_1 = (
         "Let me inspect the context.\n\n"
-        "```python\nprint(context[:100])\n```"
+        "```repl\nprint(context[:100])\n```"
     )
     step_out = env.step(action_1)
     print("\n=== Turn 1 ===")
     print(f"  Reward: {step_out['reward']}, Done: {step_out['done']}")
     for obs in step_out["observations"]:
-        print(f"  [{obs['role']}] {obs['content']}")
+        preview = obs["content"][:200].replace("\n", "\\n")
+        print(f"  [{obs['role']}] {preview}")
 
-    # Turn 2: test llm_query if available, otherwise go straight to answer
-    if llm_query_fn:
-        action_2 = (
-            "Let me use llm_query to extract the answer.\n\n"
-            '```python\nanswer = llm_query("What is the capital city mentioned in this text? '
-            'Return only the city name.\\n\\n" + context)\n'
-            'print(f"llm_query returned: {answer}")\n'
-            "Final = answer.strip()\n```"
-        )
-    else:
-        action_2 = (
-            "I can see the answer.\n\n"
-            '```python\nFinal = "Paris"\n```'
-        )
+    action_2 = (
+        "I can see the answer is Paris.\n\n"
+        "```repl\nmy_answer = \"Paris\"\nprint(my_answer)\n```\n\n"
+        "FINAL_VAR(my_answer)"
+    )
     step_out = env.step(action_2)
     print("\n=== Turn 2 ===")
     print(f"  Reward: {step_out['reward']}, Done: {step_out['done']}")
-    for obs in step_out["observations"]:
-        print(f"  [{obs['role']}] {obs['content']}")
 
     print("\n=== Metrics ===")
     for k, v in env.get_metrics().items():

@@ -11,12 +11,6 @@ set -x
 : "${LOGGER:=console}"
 : "${INFERENCE_BACKEND:=vllm}"
 
-# Sub-LLM for llm_query() inside the REPL. Set SUB_MODEL to enable.
-# For OpenAI models (e.g. gpt-5-mini), just export OPENAI_API_KEY.
-# For a local vLLM server, also set SUB_MODEL_URL.
-: "${SUB_MODEL:=gpt-5-mini}"
-: "${SUB_MODEL_URL:=}"
-
 uv run --isolated --extra fsdp -v -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
@@ -57,6 +51,4 @@ uv run --isolated --extra fsdp -v -m skyrl.train.entrypoints.main_base \
   trainer.resume_mode=null \
   trainer.log_path="$HOME/SkyRL/tmp/skyrl-logs" \
   trainer.ckpt_path="$HOME/SkyRL/ckpts/rlm_ckpt" \
-  ${SUB_MODEL:+environment.skyrl_gym.rlm.sub_model_name="$SUB_MODEL"} \
-  ${SUB_MODEL_URL:+environment.skyrl_gym.rlm.sub_model_url="$SUB_MODEL_URL"} \
   "$@"

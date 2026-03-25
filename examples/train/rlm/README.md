@@ -5,7 +5,7 @@ RLMEnv is a multi-turn environment where the model interacts with a Python REPL.
 - **Prompt** – direct instructions / tips the model sees in full in its context window (like a system prompt).
 - **Context** – a large text stored externally in the REPL as the `context` variable. The model only sees a short preview and must run code to read more.
 
-The model writes Python code (in ` ```python ... ``` ` blocks) to inspect `context`, optionally call `llm_query()`, and set `Final` when done. Reward is computed from `Final` vs `ground_truth`.
+The model writes Python code (in ` ```repl ... ``` ` blocks) to inspect `context` and produce a final answer via `FINAL(...)` or `FINAL_VAR(var)`. Reward is computed against `ground_truth`.
 
 ## Simplest way to start a training loop
 
@@ -51,8 +51,5 @@ Required for RLM:
 
 Optional RLM env config (under `environment.skyrl_gym.rlm`):
 
-- `metadata_prefix_length` (default 500) – chars of stdout shown in observations.
-- `repl_timeout` (default 30.0) – timeout per REPL execution (seconds).
-- `max_sub_calls_per_episode` (default 20) – max `llm_query()` calls per episode.
-- `sub_model_url` – OpenAI-compatible endpoint for the frozen sub-LLM. If not set, `llm_query()` is not available.
-- `sub_model_name` – model name for the sub-LLM endpoint.
+- `repl_timeout` (default 15.0) – timeout per REPL execution (seconds).
+- `custom_system_prompt` – fully replace the default RLM system prompt with a custom one.

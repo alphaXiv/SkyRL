@@ -542,23 +542,10 @@ class GSM8kLLMJudgeEnvConfig(BaseConfig):
 class RLMEnvConfig(BaseConfig):
     """Configuration for the Recursive Language Model environment."""
 
-    sub_model_url: Optional[str] = None
-    """OpenAI-compatible endpoint URL for the frozen sub-LLM (e.g. a local
-    vLLM server). Leave as None to use the official OpenAI API."""
-    sub_model_name: Optional[str] = None
-    """Model name for the sub-LLM endpoint (e.g. ``gpt-5-mini``).  Setting
-    this enables ``llm_query()`` in the REPL."""
-    sub_model_api_key: Optional[str] = None
-    """API key for the sub-LLM endpoint.  When using OpenAI and this is None,
-    the ``OPENAI_API_KEY`` environment variable is used automatically."""
-    metadata_prefix_length: int = 500
-    """Number of characters of stdout to show the model in observations."""
     repl_timeout: float = 15.0
     """Timeout in seconds for each REPL code execution."""
-    max_sub_calls_per_episode: int = 20
-    """Maximum number of ``llm_query()`` calls allowed per episode."""
-    supplementary_system_prompt: Optional[str] = None
-    """Extra instructions appended to the default RLM system prompt."""
+    custom_system_prompt: Optional[str] = None
+    """Custom system prompt that fully replaces the default RLM system prompt."""
 
 
 @dataclass

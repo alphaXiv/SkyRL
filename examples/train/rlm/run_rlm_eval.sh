@@ -10,40 +10,15 @@ set -x
 : "${TP_SIZE:=4}"
 : "${LOGGER:=console}"
 : "${INFERENCE_BACKEND:=vllm}"
-: "${MODEL_PATH:=Qwen/Qwen3.5-27B}"
+: "${MODEL_PATH:=alphaXiv/rlm-sft-Qwen3.5-9B-v1}"
 
-# Sub-LLM for llm_query() inside the REPL. Set SUB_MODEL to enable.
-# For OpenAI models (e.g. gpt-5-mini), just export OPENAI_API_KEY.
-# For a local vLLM server, also set SUB_MODEL_URL.
-: "${SUB_MODEL:=gpt-5.4-mini}"
-: "${SUB_MODEL_URL:=}"
-
-# Extra instructions appended to the default RLM system prompt.
-# Uses a heredoc (with single-quoted delimiter to prevent any expansion)
-# so the prompt can contain backticks, curly braces, quotes, etc. literally.
-if [ -z "${SUPPLEMENTARY_SYSTEM_PROMPT:-}" ]; then
-SUPPLEMENTARY_SYSTEM_PROMPT=$(cat <<'PROMPT_EOF'
-
-<env_tips>
-Strategy for long-context information retrieval:
-
-1. Split the context into chunks (e.g., by paragraphs or fixed character windows with some overlap)
-2. Write a prompt describing what to look for, then append it to each chunk to create a list of prompts
-3. Call llm_query() many times with each prompt to scan chunks
-4. Aggregate the relevant findings from the responses
-
-Note: llm_query() uses gpt-5.4-mini which has a 400k token context window. Use this to inform your chunking strategy.
-
-</env_tips>
-PROMPT_EOF
-)
-fi
-
-# YAML-escape the prompt for OmegaConf CLI: wrap in single quotes,
-# doubling any internal single quotes (the only escape YAML single-quoted
-# scalars need). This prevents YAML from interpreting colons, dashes, etc.
+# Optional: fully replace the default RLM system prompt.
+# Export CUSTOM_SYSTEM_PROMPT before running to override. Must be a complete
+# system prompt (not just an addendum) — it replaces the default entirely.
+# Uses heredoc-style YAML escaping so the prompt can contain backticks,
+# curly braces, quotes, etc. literally.
 _sq="'"
-_YAML_PROMPT="${SUPPLEMENTARY_SYSTEM_PROMPT//$_sq/$_sq$_sq}"
+_YAML_PROMPT="${CUSTOM_SYSTEM_PROMPT//$_sq/$_sq$_sq}"
 _YAML_PROMPT="${_sq}${_YAML_PROMPT}${_sq}"
 
 uv run --extra fsdp -m skyrl.train.entrypoints.main_generate \
@@ -68,7 +43,5 @@ uv run --extra fsdp -m skyrl.train.entrypoints.main_generate \
   trainer.logger="$LOGGER" \
   trainer.project_name="rlm" \
   trainer.run_name="rlm_eval" \
-  ${SUB_MODEL:+environment.skyrl_gym.rlm.sub_model_name="$SUB_MODEL"} \
-  ${SUB_MODEL_URL:+environment.skyrl_gym.rlm.sub_model_url="$SUB_MODEL_URL"} \
-  ${SUPPLEMENTARY_SYSTEM_PROMPT:+environment.skyrl_gym.rlm.supplementary_system_prompt="$_YAML_PROMPT"} \
+  ${CUSTOM_SYSTEM_PROMPT:+environment.skyrl_gym.rlm.custom_system_prompt="$_YAML_PROMPT"} \
   "$@"

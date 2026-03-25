@@ -2,8 +2,7 @@
 Train an RLM (Recursive Language Model) with SkyRL.
 
 Generates dataset, then trains a model to interact with long contexts
-through a REPL environment. Optionally uses llm_query() to call a frozen
-external sub-LLM.
+through a REPL environment.
 
 Usage:
     # 1. Generate the dataset
