@@ -15,7 +15,9 @@ Usage:
 import json
 import os
 import random
+from collections import Counter
 from pathlib import Path
+from typing import Optional
 
 import ray
 import torch
@@ -26,7 +28,7 @@ from tqdm import tqdm
 
 from ray.util.placement_group import placement_group
 
-from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.config import SkyRLTrainConfig, AlgorithmConfig
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
@@ -34,6 +36,32 @@ from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
 from skyrl.train.utils.utils import initialize_ray, validate_cfg, ResolvedPlacementGroup
 from skyrl.train.utils import get_ray_pg_ready_with_timeout
 from skyrl.train.utils.tracking import Tracking
+from skyrl.backends.skyrl_train.utils.ppo_utils import PolicyLossRegistry
+
+
+def paper_ce_loss(
+    log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    advantages: torch.Tensor,
+    config: AlgorithmConfig,
+    loss_mask: Optional[torch.Tensor] = None,
+    rollout_logprobs: Optional[torch.Tensor] = None,
+):
+    """
+    Group-normalized cross-entropy loss.
+
+    Each sample's NLL is weighted by 1/group_size so every paper (chatId +
+    paperVersionId) contributes equally to the gradient regardless of how many
+    pages it has.  The weights are passed in via the `advantages` tensor.
+    """
+    elementwise_loss = -log_probs
+    if loss_mask is not None:
+        elementwise_loss = elementwise_loss * loss_mask
+    loss = (elementwise_loss * advantages).sum()
+    return loss, {"clip_ratio": 0.0}
+
+
+PolicyLossRegistry.register("paper_ce", paper_ce_loss)
 
 SYSTEM_PROMPT = (
     "You will be given a query, the paper's title and abstract, and the text of one page of a PDF. "
@@ -51,6 +79,7 @@ def get_sft_config() -> SkyRLTrainConfig:
     cfg.generator.inference_engine.tensor_parallel_size = 1
     cfg.trainer.logger = os.environ.get("LOGGER", "console")
     cfg.trainer.micro_train_batch_size_per_gpu = 2
+    cfg.trainer.algorithm.use_kl_loss = False
 
     validate_cfg(cfg)
     return cfg
@@ -85,7 +114,7 @@ def tokenize_sft_example(example: dict, tokenizer, max_length: int = 2048) -> di
     full_tokens = tokenizer(full_text, add_special_tokens=False)
 
     if len(full_tokens["input_ids"]) > max_length:
-        return {"input_ids": [], "attention_mask": [], "num_actions": 0, "label": example["label"], "_valid": False}
+        return {"input_ids": [], "attention_mask": [], "num_actions": 0, "label": example["label"], "group_key": "", "_valid": False}
 
     prompt_tokens = tokenizer(prompt_text, add_special_tokens=False)
     prompt_len = len(prompt_tokens["input_ids"])
@@ -93,13 +122,14 @@ def tokenize_sft_example(example: dict, tokenizer, max_length: int = 2048) -> di
     num_actions = full_len - prompt_len
 
     if num_actions <= 0:
-        return {"input_ids": [], "attention_mask": [], "num_actions": 0, "label": example["label"], "_valid": False}
+        return {"input_ids": [], "attention_mask": [], "num_actions": 0, "label": example["label"], "group_key": "", "_valid": False}
 
     return {
         "input_ids": full_tokens["input_ids"],
         "attention_mask": full_tokens["attention_mask"],
         "num_actions": num_actions,
         "label": example["label"],
+        "group_key": example["chatId"] + "|" + example["paperVersionId"],
         "_valid": True,
     }
 
@@ -111,6 +141,7 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
     sequences = []
     attention_masks = []
     loss_masks = []
+    advantages = []
 
     for ex in examples:
         pad_len = max_len - len(ex["input_ids"])
@@ -118,12 +149,15 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
         attention_masks.append([0] * pad_len + ex["attention_mask"])
         action_pad = max_num_actions - ex["num_actions"]
         loss_masks.append([0] * action_pad + [1] * ex["num_actions"])
+        w = ex.get("group_weight", 1.0)
+        advantages.append([0.0] * action_pad + [w] * ex["num_actions"])
 
     batch = TrainingInputBatch(
         {
             "sequences": torch.tensor(sequences, dtype=torch.long),
             "attention_mask": torch.tensor(attention_masks, dtype=torch.long),
             "loss_mask": torch.tensor(loss_masks, dtype=torch.long),
+            "advantages": torch.tensor(advantages, dtype=torch.float32),
         }
     )
     batch.metadata = {"response_length": max_num_actions}
@@ -245,10 +279,13 @@ def main():
     )
     train_mapped = train_mapped.filter(lambda ex: ex["_valid"], num_proc=num_workers)
     tokenized_train = [
-        {"input_ids": ex["input_ids"], "attention_mask": ex["attention_mask"], "num_actions": ex["num_actions"], "label": ex["label"]}
+        {"input_ids": ex["input_ids"], "attention_mask": ex["attention_mask"], "num_actions": ex["num_actions"], "label": ex["label"], "group_key": ex["group_key"]}
         for ex in train_mapped
     ]
-    logger.info(f"Train: kept {len(tokenized_train)}/{len(train_dataset)} examples")
+    group_sizes = Counter(ex["group_key"] for ex in tokenized_train)
+    for ex in tokenized_train:
+        ex["group_weight"] = 1.0 / group_sizes[ex["group_key"]]
+    logger.info(f"Train: kept {len(tokenized_train)}/{len(train_dataset)} examples across {len(group_sizes)} paper groups")
 
     logger.info("Tokenizing validation dataset...")
     val_mapped = val_dataset.map(
@@ -296,7 +333,7 @@ def main():
             batch_examples = tokenized_train[:batch_size]
 
         batch = collate_sft_batch(batch_examples, tokenizer)
-        metrics = dispatch.forward_backward("policy", batch, loss_fn="cross_entropy")
+        metrics = dispatch.forward_backward("policy", batch, loss_fn="paper_ce")
         grad_norm = dispatch.optim_step("policy")
 
         train_loss = metrics.get("final_loss", metrics.get("loss", 0.0))
