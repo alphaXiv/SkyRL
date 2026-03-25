@@ -2,7 +2,11 @@
 """Pretty-print rollout data from a dumped eval JSONL file."""
 
 import argparse
+import ast
+import contextlib
+import io
 import json
+import re
 import textwrap
 from pathlib import Path
 
@@ -83,21 +87,137 @@ def estimate_tokens(text: str) -> int:
     return max(1, int(len(text) / 3.5))
 
 
+def _trajectory_f1(scores: list) -> float:
+    """Get the actual trajectory F1: the last non-zero value in per-token rewards."""
+    if not scores:
+        return 0.0
+    for v in reversed(scores):
+        if v > 0:
+            return v
+    return 0.0
+
+
 def _fmt_scores(scores: list) -> str:
-    """Format a score list as a colored string, showing the actual value."""
+    """Format a score list as a colored string using the actual trajectory F1."""
     if not scores:
         return c("no scores", "dim")
-    avg = sum(scores) / len(scores)
-    val_str = f"{avg:.3f}" if len(scores) == 1 else f"avg {avg:.3f}"
-    if avg >= 0.99:
-        return c(f"{val_str}  (exact match)", "bold", "green")
-    elif avg > 0.0:
-        return c(f"{val_str}  (partial)", "yellow", "bold")
+    f1 = _trajectory_f1(scores)
+    if f1 >= 0.99:
+        return c(f"F1={f1:.3f}  (exact)", "bold", "green")
+    elif f1 > 0.0:
+        return c(f"F1={f1:.3f}  (partial)", "yellow", "bold")
     else:
-        return c(f"{val_str}  (no match)", "bold", "red")
+        return c(f"F1={f1:.3f}  (no match)", "bold", "red")
 
 
-def print_step_wise_trajectory(traj_idx: int, steps: list[dict], max_response_chars: int, max_context_chars: int, show_context: bool):
+def _fmt_prf(p, r, f1) -> str:
+    """Format P/R/F1 as a colored string."""
+    if f1 is None:
+        return c("—", "dim")
+    color = "green" if f1 >= 0.99 else ("yellow" if f1 > 0.0 else "red")
+    p_str = f"{p:.3f}" if p is not None else "—"
+    r_str = f"{r:.3f}" if r is not None else "—"
+    return c(f"F1={f1:.3f}", color, "bold") + c(f"  P={p_str}  R={r_str}", color)
+
+
+def compute_prf(steps: list) -> tuple:
+    """
+    Recompute precision, recall, F1 for a trajectory by re-executing its REPL blocks.
+
+    Returns (precision, recall, f1). If recomputation fails, precision and recall
+    are None and f1 falls back to the stored per-token reward.
+    """
+    last = steps[-1]
+    stored_f1 = _trajectory_f1(last["score"])
+
+    # Only works for envs that store evidence + context_text
+    try:
+        from skyrl_gym.envs.rlm.evidence_tools import compute_metrics, make_tools
+    except ImportError:
+        return None, None, stored_f1
+
+    extras = last["env_extras"]
+    rs = extras.get("reward_spec", {})
+    if isinstance(rs, str):
+        rs = eval(rs)
+    evidence = rs.get("evidence") if isinstance(rs, dict) else None
+    if not evidence:
+        return None, None, stored_f1
+
+    extra_info = extras.get("extra_info", {})
+    if isinstance(extra_info, str):
+        extra_info = eval(extra_info)
+    ctx = extra_info.get("context_text", "") if isinstance(extra_info, dict) else ""
+    if not ctx:
+        return None, None, stored_f1
+
+    # Build full conversation text
+    full_conv = steps[0]["input_prompt"]
+    for step in steps:
+        full_conv += step["output_response"]
+
+    # Use the LAST FINAL_VAR call (the first match is often in the system prompt example)
+    final_var_matches = list(re.finditer(r'FINAL_VAR\((\w+)\)', full_conv))
+    if not final_var_matches:
+        return None, None, stored_f1
+    varname = final_var_matches[-1].group(1)
+
+    repl_blocks = re.findall(r'```repl\n(.*?)```', full_conv, re.DOTALL)
+    if not repl_blocks:
+        return None, None, stored_f1
+
+    tools = make_tools(ctx)
+    ns = {
+        "search": tools["search"]["tool"],
+        "extract_section": tools["extract_section"]["tool"],
+        "SHOW_VARS": lambda: list(ns.keys()),
+        "FINAL_VAR": lambda v: None,
+        "context": ctx,
+    }
+
+    final_answer_str = None
+    for block in repl_blocks:
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                exec(block, ns)  # noqa: S102
+        except Exception:
+            pass
+        if "FINAL_VAR" in block:
+            val = ns.get(varname)
+            if val is not None:
+                final_answer_str = str(val)
+            break
+
+    if final_answer_str is None:
+        return None, None, stored_f1
+
+    # Reproduce reward_fn logic from evidence_tools.make_reward_fn
+    evidence_intervals = []
+    for ev in evidence:
+        idx = ctx.find(ev.strip())
+        if idx != -1:
+            evidence_intervals.append((idx, idx + len(ev.strip())))
+
+    try:
+        substrings = ast.literal_eval(final_answer_str)
+        if isinstance(substrings, str):
+            substrings = [substrings]
+        elif not isinstance(substrings, list):
+            substrings = [str(substrings)]
+    except (ValueError, SyntaxError):
+        substrings = [s.strip() for s in final_answer_str.split("\n\n") if s.strip()]
+
+    retrieved_intervals = []
+    for s in substrings:
+        idx = ctx.find(s)
+        if idx != -1:
+            retrieved_intervals.append((idx, idx + len(s)))
+
+    metrics = compute_metrics(retrieved_intervals, evidence_intervals)
+    return metrics["precision"], metrics["recall"], metrics["f1"]
+
+
+def print_step_wise_trajectory(traj_idx: int, steps: list[dict], max_response_chars: int, max_context_chars: int, show_context: bool, prf: tuple = None):
     """Print a grouped step-wise trajectory (multiple records = one trajectory)."""
     first = steps[0]
     last = steps[-1]
@@ -116,6 +236,8 @@ def print_step_wise_trajectory(traj_idx: int, steps: list[dict], max_response_ch
     data_source = first["data_source"]
     scores = last["score"]
     stop_reason = last["stop_reason"]
+    if prf is None:
+        prf = (None, None, _trajectory_f1(scores))
 
     # Combine all steps into the full conversation
     full_transcript = first["input_prompt"]
@@ -139,6 +261,7 @@ def print_step_wise_trajectory(traj_idx: int, steps: list[dict], max_response_ch
     print(section_header("Metadata"))
     print()
 
+    precision, recall, f1 = prf
     meta_rows = [
         ("Env Class", c(env_class, "bold")),
         ("Data Source", data_source),
@@ -147,8 +270,8 @@ def print_step_wise_trajectory(traj_idx: int, steps: list[dict], max_response_ch
         ("Max Turns", str(max_turns)),
         ("Actual Steps", f"{len(steps)} steps, {len(assistant_turns)} assistant, {len(repl_turns)} REPL"),
         ("Total Generation", f"~{total_response_tokens:,} tokens ({total_response_chars:,} chars)"),
-        ("Score Samples", f"{len(scores):,}"),
-        ("Score (F1)", _fmt_scores(scores)),
+        ("── Metrics ──", ""),
+        ("F1 / Precision / Recall", _fmt_prf(precision, recall, f1)),
     ]
     for label, value in meta_rows:
         print(f"  {c(label + ':', 'bold'):>38s}  {value}")
@@ -313,7 +436,7 @@ def group_step_wise_trajectories(records: list[dict]) -> list[list[dict]]:
     for r in records[1:]:
         prev_len = len(current[-1]["input_prompt"])
         cur_len = len(r["input_prompt"])
-        if cur_len <= len(current[0]["input_prompt"]):
+        if cur_len <= prev_len:
             trajectories.append(current)
             current = [r]
         else:
@@ -323,25 +446,28 @@ def group_step_wise_trajectories(records: list[dict]) -> list[list[dict]]:
     return trajectories
 
 
-def print_trajectory_summary(trajectories: list[list[dict]]):
+def print_trajectory_summary(trajectories: list[list[dict]], all_prf: list[tuple] = None):
     """Print a compact summary table of all trajectories."""
-    print(f"  {'#':>4}  {'Steps':>5}  {'Stop':>8}  {'Init Prompt':>13}  {'Final Prompt':>13}  {'Tot Gen':>13}  {'Score':>8}  {'GT':>6}")
-    print(f"  {'─' * 4}  {'─' * 5}  {'─' * 8}  {'─' * 13}  {'─' * 13}  {'─' * 13}  {'─' * 8}  {'─' * 6}")
+    print(f"  {'#':>4}  {'Steps':>5}  {'Stop':>8}  {'F1':>6}  {'Prec':>6}  {'Rec':>6}  {'Tot Gen':>10}  {'GT':>6}")
+    print(f"  {'─' * 4}  {'─' * 5}  {'─' * 8}  {'─' * 6}  {'─' * 6}  {'─' * 6}  {'─' * 10}  {'─' * 6}")
     for ti, steps in enumerate(trajectories):
         n_steps = len(steps)
         sr = steps[-1]["stop_reason"]
-        init_tok = estimate_tokens(steps[0]["input_prompt"])
-        final_tok = estimate_tokens(steps[-1]["input_prompt"])
         total_gen_tok = sum(estimate_tokens(s["output_response"]) for s in steps)
-        scores = steps[-1]["score"]
-        score_str = _fmt_scores(scores)
         extras = steps[0]["env_extras"]
         rs = extras.get("reward_spec", {})
         if isinstance(rs, str):
             rs = eval(rs)
         gt = rs.get("ground_truth", "?")
         sr_colored = c(sr, "green") if sr == "stop" else c(sr, "yellow", "bold")
-        print(f"  {ti:>4}  {n_steps:>5}  {sr_colored:>19}  {init_tok:>8} tok  {final_tok:>8} tok  {total_gen_tok:>8} tok  {score_str:>19}  {str(gt):>6}")
+
+        p, r, f1 = all_prf[ti] if all_prf else (None, None, _trajectory_f1(steps[-1]["score"]))
+        f1_color = "green" if f1 >= 0.99 else ("yellow" if f1 > 0.0 else "red")
+        f1_str = c(f"{f1:.3f}", f1_color, "bold")
+        p_str = c(f"{p:.3f}", f1_color) if p is not None else c("—", "dim")
+        r_str = c(f"{r:.3f}", f1_color) if r is not None else c("—", "dim")
+
+        print(f"  {ti:>4}  {n_steps:>5}  {sr_colored:>19}  {f1_str:>17}  {p_str:>17}  {r_str:>17}  {total_gen_tok:>6} tok  {str(gt):>6}")
     print()
 
 
@@ -367,6 +493,7 @@ def main():
     parser.add_argument("--scores-only", action="store_true", help="Only print a compact score summary for each raw record")
     parser.add_argument("--summary", action="store_true", help="Print a compact trajectory summary table with per-step lengths")
     parser.add_argument("--raw", action="store_true", help="Show raw per-record view instead of grouped trajectory view")
+    parser.add_argument("--recompute-prf", action="store_true", help="Recompute precision/recall by re-executing REPL blocks (RLM env only)")
     args = parser.parse_args()
 
     if not args.file.exists():
@@ -388,6 +515,15 @@ def main():
         print(c(f"  Grouped into {len(trajectories)} trajectories (step-wise, {total / len(trajectories):.0f} steps avg)", "dim"))
     print()
 
+    # Precompute P/R/F1 for all trajectories if requested
+    all_prf = None
+    if args.recompute_prf and is_step_wise:
+        print(c("  Computing P/R/F1 (re-executing REPL blocks)...", "dim"))
+        all_prf = []
+        for steps in trajectories:
+            all_prf.append(compute_prf(steps))
+        print()
+
     if args.scores_only:
         print(f"  {'#':>4}  {'Stop':>8}  {'GT':>6}  {'Env':>6}  {'Score':>12}  {'Prompt':>10}  {'Resp':>10}")
         print(f"  {'─' * 4}  {'─' * 8}  {'─' * 6}  {'─' * 6}  {'─' * 12}  {'─' * 10}  {'─' * 10}")
@@ -407,7 +543,7 @@ def main():
 
     if args.summary:
         if is_step_wise:
-            print_trajectory_summary(trajectories)
+            print_trajectory_summary(trajectories, all_prf)
             for ti, steps in enumerate(trajectories):
                 print(c(f"  Trajectory {ti}:", "bold"))
                 print(f"    {'Step':>4}  {'Prompt':>10}  {'Response':>10}  {'Stop':>8}")
@@ -437,7 +573,8 @@ def main():
         print(c(f"  Showing trajectories {start}..{end - 1}  (of {len(trajectories)} total)", "dim"))
         print()
         for ti in range(start, end):
-            print_step_wise_trajectory(ti, trajectories[ti], args.max_response_chars, args.max_context_chars, args.show_context)
+            prf = all_prf[ti] if all_prf else None
+            print_step_wise_trajectory(ti, trajectories[ti], args.max_response_chars, args.max_context_chars, args.show_context, prf=prf)
     else:
         start = args.offset
         end = min(start + args.max_rollouts, total)

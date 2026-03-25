@@ -62,8 +62,15 @@ uv run --extra fsdp -m skyrl.train.entrypoints.main_generate \
   trainer.placement.colocate_all=false \
   trainer.max_prompt_length=512 \
   generator.max_input_length=32768 \
+  generator.inference_engine.engine_init_kwargs.language_model_only=true \
+  generator.chat_template_kwargs.enable_thinking=false \
   generator.eval_sampling_params.max_generate_length=4096 \
-  generator.eval_sampling_params.temperature=1.0 \
+  generator.eval_sampling_params.temperature=0.7 \
+  generator.eval_sampling_params.top_p=0.8 \
+  generator.eval_sampling_params.top_k=20 \
+  generator.eval_sampling_params.min_p=0.0 \
+  generator.eval_sampling_params.repetition_penalty=1.0 \
+  generator.eval_sampling_params.additional_kwargs.presence_penalty=1.5 \
   generator.eval_n_samples_per_prompt=1 \
   generator.inference_engine.backend=$INFERENCE_BACKEND \
   generator.inference_engine.num_engines=$NUM_ENGINES \
