@@ -5,27 +5,29 @@ RLMEnv is a multi-turn environment where the model interacts with a Python REPL.
 - **Prompt** – direct instructions / tips the model sees in full in its context window (like a system prompt).
 - **Context** – a large text stored externally in the REPL as the `context` variable. The model only sees a short preview and must run code to read more.
 
-The model writes Python code (in ` ```repl ... ``` ` blocks) to inspect `context` and produce a final answer via `FINAL(...)` or `FINAL_VAR(var)`. Reward is computed against `ground_truth`.
+The model writes Python code (in ` ```repl ... ``` ` blocks) to inspect `context` using `search()` and `extract_section()` tools, then returns a list of retrieved text spans via `FINAL_VAR(var)`. Reward is F1 over retrieved text intervals vs. ground-truth evidence spans.
 
 ## Simplest way to start a training loop
 
 ### 1. Create an RLM dataset
 
-Each row must have:
+The default dataset is **QASPER** (academic paper evidence retrieval), loaded from `data/qasper-train-cleaned.json`.
 
-- **`prompt`**: list of messages — the direct instructions / tips the model sees in full.
+Each row has:
+
+- **`prompt`**: list of messages — the question the model must answer.
 - **`env_class`**: `"rlm"`.
-- **`reward_spec`**: dict with **`ground_truth`** (required). Compared to `Final` (exact match → 1.0, numeric match → 1.0, substring → 0.5, else 0.0).
-- Optionally **`max_turns`** (default 10).
-- Optionally **`extra_info`**: dict that can include:
-  - **`context_text`**: the external text stored in the REPL as the `context` variable. If not set, the `prompt` content is used as both the direct message and the REPL context.
+- **`reward_spec`**: dict with **`evidence`** (list of ground-truth text spans). Reward is F1 over retrieved intervals. Alternatively, set **`ground_truth`** for exact-match reward.
+- **`max_turns`** (default 10).
+- **`extra_info`**: dict with **`context_text`** — the full paper text loaded into the REPL as `context`.
 
-Example: save as Parquet or JSON/JSONL with columns `prompt`, `env_class`, `reward_spec`, and optionally `max_turns`, `extra_info`.
+The generator automatically builds per-example `search()` / `extract_section()` REPL tools and the F1 `reward_fn` from the serializable dataset fields at runtime.
 
-You can generate a small dataset with:
+Generate the dataset:
 
 ```bash
 uv run -- python examples/train/rlm/rlm_dataset.py --output_dir $HOME/data/rlm
+uv run -- python examples/train/rlm/rlm_dataset.py --output_dir $HOME/data/rlm --n_val 100  # larger eval set
 ```
 
 ### 2. Launch training

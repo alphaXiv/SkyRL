@@ -83,6 +83,20 @@ def estimate_tokens(text: str) -> int:
     return max(1, int(len(text) / 3.5))
 
 
+def _fmt_scores(scores: list) -> str:
+    """Format a score list as a colored string, showing the actual value."""
+    if not scores:
+        return c("no scores", "dim")
+    avg = sum(scores) / len(scores)
+    val_str = f"{avg:.3f}" if len(scores) == 1 else f"avg {avg:.3f}"
+    if avg >= 0.99:
+        return c(f"{val_str}  (exact match)", "bold", "green")
+    elif avg > 0.0:
+        return c(f"{val_str}  (partial)", "yellow", "bold")
+    else:
+        return c(f"{val_str}  (no match)", "bold", "red")
+
+
 def print_step_wise_trajectory(traj_idx: int, steps: list[dict], max_response_chars: int, max_context_chars: int, show_context: bool):
     """Print a grouped step-wise trajectory (multiple records = one trajectory)."""
     first = steps[0]
@@ -102,8 +116,6 @@ def print_step_wise_trajectory(traj_idx: int, steps: list[dict], max_response_ch
     data_source = first["data_source"]
     scores = last["score"]
     stop_reason = last["stop_reason"]
-    any_nonzero = any(s != 0.0 for s in scores)
-    unique_scores = set(scores)
 
     # Combine all steps into the full conversation
     full_transcript = first["input_prompt"]
@@ -111,7 +123,7 @@ def print_step_wise_trajectory(traj_idx: int, steps: list[dict], max_response_ch
         full_transcript += step["output_response"]
     turns = parse_prompt_turns(full_transcript)
     assistant_turns = [t for t in turns if t["role"] == "assistant" and len(t["content"].strip()) > 10]
-    repl_turns = [t for t in turns if t["role"] == "user" and t["content"].startswith("[Execution Result]")]
+    repl_turns = [t for t in turns if t["role"] == "user" and t["content"].startswith("Code executed:")]
 
     total_response_chars = sum(len(s["output_response"]) for s in steps)
     total_response_tokens = sum(estimate_tokens(s["output_response"]) for s in steps)
@@ -136,7 +148,7 @@ def print_step_wise_trajectory(traj_idx: int, steps: list[dict], max_response_ch
         ("Actual Steps", f"{len(steps)} steps, {len(assistant_turns)} assistant, {len(repl_turns)} REPL"),
         ("Total Generation", f"~{total_response_tokens:,} tokens ({total_response_chars:,} chars)"),
         ("Score Samples", f"{len(scores):,}"),
-        ("Score Values", c("PASS", "bold", "green") if any_nonzero else c(f"ALL ZERO  (unique: {unique_scores})", "bold", "red")),
+        ("Score (F1)", _fmt_scores(scores)),
     ]
     for label, value in meta_rows:
         print(f"  {c(label + ':', 'bold'):>38s}  {value}")
@@ -214,14 +226,11 @@ def print_rollout(idx: int, record: dict, max_response_chars: int, max_context_c
     env_class = record["env_class"]
     data_source = record["data_source"]
 
-    unique_scores = set(scores)
-    any_nonzero = any(s != 0.0 for s in scores)
-
     full_transcript = prompt + response
     turns = parse_prompt_turns(full_transcript)
 
     assistant_turns = [t for t in turns if t["role"] == "assistant" and len(t["content"].strip()) > 10]
-    repl_turns = [t for t in turns if t["role"] == "user" and t["content"].startswith("[Execution Result]")]
+    repl_turns = [t for t in turns if t["role"] == "user" and t["content"].startswith("Code executed:")]
 
     prompt_tok = estimate_tokens(prompt)
     resp_tok = estimate_tokens(response)
@@ -246,8 +255,7 @@ def print_rollout(idx: int, record: dict, max_response_chars: int, max_context_c
         ("Agent Turns", f"{len(assistant_turns)} assistant, {len(repl_turns)} REPL"),
         ("Prompt Length", f"~{prompt_tok:,} tokens ({len(prompt):,} chars)"),
         ("Response Length", f"~{resp_tok:,} tokens ({len(response):,} chars)"),
-        ("Score Samples", f"{len(scores):,}"),
-        ("Score Values", c("PASS", "bold", "green") if any_nonzero else c(f"ALL ZERO  (unique: {unique_scores})", "bold", "red")),
+        ("Score (F1)", _fmt_scores(scores)),
     ]
     for label, value in meta_rows:
         print(f"  {c(label + ':', 'bold'):>38s}  {value}")
@@ -326,8 +334,7 @@ def print_trajectory_summary(trajectories: list[list[dict]]):
         final_tok = estimate_tokens(steps[-1]["input_prompt"])
         total_gen_tok = sum(estimate_tokens(s["output_response"]) for s in steps)
         scores = steps[-1]["score"]
-        nonzero = any(s != 0.0 for s in scores)
-        score_str = c("PASS", "green") if nonzero else c("FAIL", "red")
+        score_str = _fmt_scores(scores)
         extras = steps[0]["env_extras"]
         rs = extras.get("reward_spec", {})
         if isinstance(rs, str):
@@ -391,8 +398,7 @@ def main():
             if isinstance(rs, str):
                 rs = eval(rs)
             gt = rs.get("ground_truth", "?")
-            nonzero = any(s != 0.0 for s in r["score"])
-            score_str = c("PASS", "green") if nonzero else c("FAIL", "red")
+            score_str = _fmt_scores(r["score"])
             p_tok = estimate_tokens(r["input_prompt"])
             r_tok = estimate_tokens(r["output_response"])
             print(f"  {i:>4}  {r['stop_reason']:>8}  {str(gt):>6}  {r['env_class']:>6}  {score_str:>23}  {p_tok:>6} tok  {r_tok:>6} tok")

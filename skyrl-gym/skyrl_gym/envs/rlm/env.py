@@ -209,8 +209,10 @@ class RLMEnv(BaseTextEnv):
         self.extras = extras
 
         assert "reward_spec" in extras, "reward_spec field is required"
-        assert "ground_truth" in extras["reward_spec"], "ground_truth is required in reward_spec"
-        self.ground_truth = extras["reward_spec"]["ground_truth"]
+        self.ground_truth = extras["reward_spec"].get("ground_truth")
+        # reward_fn: optional callable(final_answer: str) -> float
+        # Can be passed directly or will be built lazily in init() from reward_spec data.
+        self.reward_fn = extras["reward_spec"].get("reward_fn")
         self.max_turns = extras.get("max_turns", 10)
 
         if isinstance(env_config, RLMEnvConfig):
@@ -222,6 +224,13 @@ class RLMEnv(BaseTextEnv):
 
         if extras.get("custom_system_prompt"):
             self.rlm_config.custom_system_prompt = extras["custom_system_prompt"]
+
+        # Per-example custom tools (e.g. search/extract_section that close over context)
+        # merged on top of any static config-level tools
+        if extras.get("custom_tools"):
+            merged = dict(self.rlm_config.custom_tools or {})
+            merged.update(extras["custom_tools"])
+            self.rlm_config.custom_tools = merged
 
         self.repl: Optional[PersistentREPL] = None
         self._final_answer: Optional[str] = None
@@ -237,6 +246,19 @@ class RLMEnv(BaseTextEnv):
         root_prompt = self._extract_prompt_text(prompt)
         context_payload = extra_info.get("context_text") or root_prompt
         self._root_prompt = root_prompt
+
+        # If reward_spec carries evidence spans but no reward_fn, build both the reward_fn
+        # and per-example custom tools (search/extract_section) from the serializable data.
+        # This keeps the dataset Parquet-serializable while still supporting callable-based reward.
+        reward_spec = self.extras.get("reward_spec", {})
+        if self.reward_fn is None and reward_spec.get("evidence") is not None:
+            from skyrl_gym.envs.rlm.evidence_tools import make_reward_fn, make_tools
+            evidence = reward_spec["evidence"]
+            self.reward_fn = make_reward_fn(context_payload, evidence)
+            tools = make_tools(context_payload)
+            merged = dict(self.rlm_config.custom_tools or {})
+            merged.update(tools)
+            self.rlm_config.custom_tools = merged
 
         self.repl = PersistentREPL(
             timeout=self.rlm_config.repl_timeout,
@@ -269,16 +291,10 @@ class RLMEnv(BaseTextEnv):
 
         custom_tools_section = ""
         if self.rlm_config.custom_tools:
-            from skyrl_gym.tools.repl import _extract_tool_value
-            lines = []
-            for name, entry in self.rlm_config.custom_tools.items():
-                val = _extract_tool_value(entry)
-                desc = entry.get("description", "") if isinstance(entry, dict) else ""
-                if callable(val):
-                    lines.append(f"- `{name}`: {desc}" if desc else f"- `{name}`: A custom function")
-                else:
-                    lines.append(f"- `{name}`: {desc}" if desc else f"- `{name}`: A custom {type(val).__name__} value")
-            custom_tools_section = "\nCustom tools and data available in the REPL:\n" + "\n".join(lines)
+            from skyrl_gym.tools.repl import format_tools_for_prompt
+            tools_formatted = format_tools_for_prompt(self.rlm_config.custom_tools)
+            if tools_formatted:
+                custom_tools_section = f"\n4. Custom tools and data available in the REPL:\n{tools_formatted}"
 
         return template.format(custom_tools_section=custom_tools_section)
 
@@ -344,6 +360,9 @@ class RLMEnv(BaseTextEnv):
             return 0.0
         if final_answer is None:
             return 0.0
+
+        if self.reward_fn is not None:
+            return float(self.reward_fn(final_answer))
 
         final_str = str(final_answer).strip()
         gt_str = str(self.ground_truth).strip()

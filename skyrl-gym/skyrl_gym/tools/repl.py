@@ -8,7 +8,7 @@ import threading
 import traceback
 from contextlib import redirect_stdout, redirect_stderr
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -297,8 +297,64 @@ class PersistentREPL:
             )
 
 
+# ---------------------------------------------------------------------------
+# Custom tool helpers (ported from rlm/rlm/environments/base_env.py)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ToolInfo:
+    """Parsed information about a custom tool."""
+    name: str
+    value: Any
+    description: Optional[str] = None
+
+    @property
+    def is_callable(self) -> bool:
+        return callable(self.value)
+
+
 def _extract_tool_value(entry: Any) -> Any:
     """Extract the callable/value from a plain entry or {'tool': ..., 'description': ...} dict."""
     if isinstance(entry, dict) and "tool" in entry:
         return entry["tool"]
     return entry
+
+
+def _parse_tool_entry(name: str, entry: Any) -> ToolInfo:
+    """Parse a custom tool entry into a ToolInfo.
+
+    Supports two formats:
+    1. Plain value:          {"name": callable_or_value}
+    2. With description:     {"name": {"tool": callable_or_value, "description": "..."}}
+    """
+    if isinstance(entry, dict) and "tool" in entry:
+        value = entry["tool"]
+        description = entry.get("description")
+        return ToolInfo(name=name, value=value, description=description if isinstance(description, str) else None)
+    return ToolInfo(name=name, value=entry, description=None)
+
+
+def _parse_custom_tools(custom_tools: Optional[Dict[str, Any]]) -> List[ToolInfo]:
+    """Parse all custom tools into ToolInfo objects."""
+    if not custom_tools:
+        return []
+    return [_parse_tool_entry(name, entry) for name, entry in custom_tools.items()]
+
+
+def format_tools_for_prompt(custom_tools: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Format custom tools for inclusion in the system prompt.
+
+    Returns a formatted string describing available tools, or None if no tools.
+    Matches the format used by rlm/rlm/environments/base_env.py.
+    """
+    tool_infos = _parse_custom_tools(custom_tools)
+    if not tool_infos:
+        return None
+
+    lines = []
+    for tool in tool_infos:
+        if tool.is_callable:
+            lines.append(f"- `{tool.name}`: {tool.description}" if tool.description else f"- `{tool.name}`: A custom function")
+        else:
+            lines.append(f"- `{tool.name}`: {tool.description}" if tool.description else f"- `{tool.name}`: A custom {type(tool.value).__name__} value")
+    return "\n".join(lines)
