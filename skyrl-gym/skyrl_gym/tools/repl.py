@@ -171,16 +171,19 @@ class PersistentREPL:
             return answer
         available = [k for k in lookup if not k.startswith("_") and k not in self.globals]
         if available:
-            return (
+            msg = (
                 f"Error: Variable '{variable_name}' not found. "
                 f"Available variables: {available}. "
                 f"You must create and assign a variable BEFORE calling FINAL_VAR on it."
             )
-        return (
-            f"Error: Variable '{variable_name}' not found. "
-            f"No variables have been created yet. "
-            f"You must create and assign a variable in a ```repl``` block BEFORE calling FINAL_VAR on it."
-        )
+        else:
+            msg = (
+                f"Error: Variable '{variable_name}' not found. "
+                f"No variables have been created yet. "
+                f"You must create and assign a variable in a ```repl``` block BEFORE calling FINAL_VAR on it."
+            )
+        print(msg)
+        return msg
 
     def _show_vars(self) -> str:
         """Show all user-created variables in the REPL."""
