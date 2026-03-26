@@ -37,7 +37,7 @@ from skyrl.train.utils.tracking import Tracking
 
 SYSTEM_PROMPT = (
     "You will be given a query, the paper's title and abstract, and the text of one page of a PDF. "
-    "Output 1 if the page is relevant to answering the query, or 0 if it is not."
+    "Rate the page's relevance to the query on a scale from 0 (not relevant) to 9 (highly relevant)."
 )
 
 EVAL_MD_PATH = Path(__file__).parents[3] / "EVAL.md"
@@ -81,7 +81,8 @@ def build_chat_messages(example: dict) -> list[dict]:
 
 def tokenize_sft_example(example: dict, tokenizer, max_length: int = 2048) -> dict:
     messages = build_chat_messages(example)
-    completion = str(example["label"])
+    label = max(0, min(9, example["label"] - 1))
+    completion = str(label)
 
     prompt_text = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
@@ -91,7 +92,7 @@ def tokenize_sft_example(example: dict, tokenizer, max_length: int = 2048) -> di
     full_tokens = tokenizer(full_text, add_special_tokens=False)
 
     if len(full_tokens["input_ids"]) > max_length:
-        return {"input_ids": [], "attention_mask": [], "num_actions": 0, "label": example["label"], "_valid": False}
+        return {"input_ids": [], "attention_mask": [], "num_actions": 0, "label": label, "_valid": False}
 
     prompt_tokens = tokenizer(prompt_text, add_special_tokens=False)
     prompt_len = len(prompt_tokens["input_ids"])
@@ -99,13 +100,13 @@ def tokenize_sft_example(example: dict, tokenizer, max_length: int = 2048) -> di
     num_actions = full_len - prompt_len
 
     if num_actions <= 0:
-        return {"input_ids": [], "attention_mask": [], "num_actions": 0, "label": example["label"], "_valid": False}
+        return {"input_ids": [], "attention_mask": [], "num_actions": 0, "label": label, "_valid": False}
 
     return {
         "input_ids": full_tokens["input_ids"],
         "attention_mask": full_tokens["attention_mask"],
         "num_actions": num_actions,
-        "label": example["label"],
+        "label": label,
         "_valid": True,
     }
 
@@ -136,11 +137,10 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
     return batch
 
 
-def run_validation(dispatch, val_tokenized, tokenizer, batch_size, num_eval_samples=10000):
+def run_validation(dispatch, val_tokenized, tokenizer, batch_size, num_eval_samples=10000, threshold=5):
     sample = random.sample(val_tokenized, min(num_eval_samples, len(val_tokenized)))
 
-    token_id_0 = tokenizer.encode("0", add_special_tokens=False)[0]
-    token_id_1 = tokenizer.encode("1", add_special_tokens=False)[0]
+    candidate_ids = [tokenizer.encode(str(i), add_special_tokens=False)[0] for i in range(10)]
 
     total_loss = 0.0
     num_batches = 0
@@ -154,27 +154,22 @@ def run_validation(dispatch, val_tokenized, tokenizer, batch_size, num_eval_samp
             continue
 
         batch = collate_sft_batch(batch_examples, tokenizer)
+        batch.metadata["candidate_token_ids"] = candidate_ids
         num_batches += 1
 
-        examples_0 = [{**ex, "input_ids": ex["input_ids"][:-1] + [token_id_0]} for ex in batch_examples]
-        examples_1 = [{**ex, "input_ids": ex["input_ids"][:-1] + [token_id_1]} for ex in batch_examples]
+        output = dispatch.forward("policy", batch)
+        logprobs = output["output"]
 
-        output_0 = dispatch.forward("policy", collate_sft_batch(examples_0, tokenizer))
-        output_1 = dispatch.forward("policy", collate_sft_batch(examples_1, tokenizer))
-
-        logp_0 = output_0["output"].squeeze(-1)
-        logp_1 = output_1["output"].squeeze(-1)
-        preds = (logp_1 > logp_0).int().tolist()
+        preds = logprobs.argmax(dim=-1).tolist()
         if isinstance(preds, int):
             preds = [preds]
 
-        # Compute cross-entropy from the two log-probs per example
-        labels_t = torch.tensor([ex["label"] for ex in batch_examples], dtype=torch.float32)
-        correct_logp = labels_t * logp_1 + (1 - labels_t) * logp_0
+        labels_t = torch.tensor([ex["label"] for ex in batch_examples], dtype=torch.long)
+        correct_logp = logprobs[torch.arange(len(labels_t)), labels_t]
         total_loss += (-correct_logp.mean()).item()
 
-        all_preds.extend(preds)
-        all_labels.extend(ex["label"] for ex in batch_examples)
+        all_preds.extend(int(p >= threshold) for p in preds)
+        all_labels.extend(int(ex["label"] >= threshold) for ex in batch_examples)
 
     avg_loss = total_loss / max(num_batches, 1)
 

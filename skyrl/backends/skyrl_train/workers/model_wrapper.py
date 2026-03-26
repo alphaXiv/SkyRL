@@ -344,8 +344,9 @@ class HFModelWrapper(nn.Module):
         return_output=False,
         compute_entropy=False,
         entropy_requires_grad=True,
+        candidate_token_ids: Optional[list] = None,
     ) -> torch.Tensor:
-        """Returns action log probs"""
+        """Returns action log probs, or candidate log probs when candidate_token_ids is set."""
         position_ids = attention_mask.long().cumsum(-1) - 1
         position_ids.masked_fill_(attention_mask == 0, 1)
 
@@ -390,7 +391,29 @@ class HFModelWrapper(nn.Module):
         logits_BSV = output["logits"]
         logits_BSV.div_(temperature)
 
-        # NOTE: this is slightly inaccurate with sample packing because last token from nth seq -> first token of n+1th seq loss is added.
+        if candidate_token_ids is not None:
+            cand_ids = torch.tensor(candidate_token_ids, device=logits_BSV.device, dtype=torch.long)
+            candidate_lp = torch.nn.functional.log_softmax(logits_BSV, dim=-1)[:, :, cand_ids]
+
+            if self.sequence_parallel_size > 1:
+                candidate_lp = gather_outputs_and_unpad(
+                    candidate_lp, gather_dim=1, unpad_dim=1, padding_size=pad_size
+                )
+
+            if self.use_sample_packing:
+                batch_size, seqlen = attention_mask.shape
+                candidate_lp = pad_input(
+                    candidate_lp.squeeze(0), indices=nnz_indices, batch=batch_size, seqlen=seqlen
+                )
+
+            if isinstance(num_actions, list):
+                if len(num_actions) == 1:
+                    num_actions = num_actions[0]
+                else:
+                    num_actions = np.array(num_actions)
+
+            return candidate_lp[:, -(num_actions + 1), :]
+
         log_probs = logprobs_from_logits(
             logits_BSV,
             sequences_rolled,

@@ -7,6 +7,7 @@ Usage:
 
 from datasets import load_dataset
 from pprint import pprint
+from transformers import AutoTokenizer
 
 ds = load_dataset("alphaXiv/page-labels")
 print("=== Dataset structure ===")
@@ -31,3 +32,9 @@ for split_name in ds:
                 val_repr = val_repr[:300] + "..."
             print(f"    {key}: {val_repr}")
     print()
+
+tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3.5-4B-Base")
+print("=== Tokenization check for label=10 ===")
+for i in range(11):
+    ids = tokenizer.encode(str(i), add_special_tokens=False)
+    print(f"  '{i}' -> token_ids={ids}  decoded={[tokenizer.decode([t]) for t in ids]}")
