@@ -7,7 +7,8 @@ set -x
 # 2. Run: bash examples/train/rlm/run_rlm.sh
 
 : "${DATA_DIR:=$HOME/data/rlm}"
-: "${NUM_GPUS:=4}"
+: "${NUM_ENGINES:=1}"
+: "${TP_SIZE:=4}"
 : "${LOGGER:=wandb}"
 : "${INFERENCE_BACKEND:=vllm}"
 
@@ -47,7 +48,9 @@ Tables and figures are not in the text, so return text that references the corre
 To expand a snippet, call search() on the snippet itself with a larger window and bidirectional=False.
 Remember that snippets are stored in intermediate variables, so you don't have to manually write them out.}"
 
-export CUSTOM_SYSTEM_PROMPT
+_sq="'"
+_YAML_PROMPT="${CUSTOM_SYSTEM_PROMPT//$_sq/$_sq$_sq}"
+_YAML_PROMPT="${_sq}${_YAML_PROMPT}${_sq}"
 
 uv run --isolated --extra fsdp -v -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
@@ -60,10 +63,12 @@ uv run --isolated --extra fsdp -v -m skyrl.train.entrypoints.main_base \
   trainer.policy.model.path="alphaXiv/rlm-sft-Qwen3.5-9B-v1" \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
-  trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
-  trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
-  generator.inference_engine.num_engines=$NUM_GPUS \
-  generator.inference_engine.tensor_parallel_size=1 \
+  trainer.placement.policy_num_gpus_per_node=$TP_SIZE \
+  trainer.placement.ref_num_gpus_per_node=$TP_SIZE \
+  generator.inference_engine.num_engines=$NUM_ENGINES \
+  generator.inference_engine.tensor_parallel_size=$TP_SIZE \
+  trainer.policy.fsdp_config.wrap_policy.transformer_layer_cls_to_wrap="['Qwen3_5DecoderLayer']" \
+  trainer.ref.fsdp_config.wrap_policy.transformer_layer_cls_to_wrap="['Qwen3_5DecoderLayer']" \
   trainer.epochs=1 \
   trainer.eval_before_train=true \
   trainer.eval_interval=10 \
@@ -89,9 +94,10 @@ uv run --isolated --extra fsdp -v -m skyrl.train.entrypoints.main_base \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
   generator.inference_engine.async_engine=true \
-  generator.inference_engine.gpu_memory_utilization=0.8 \
+  generator.inference_engine.gpu_memory_utilization=0.85 \
   generator.max_input_length=32768 \
   generator.inference_engine.engine_init_kwargs.language_model_only=true \
+  generator.chat_template_kwargs.enable_thinking=false \
   generator.n_samples_per_prompt=8 \
   trainer.logger="['console','wandb']" \
   trainer.project_name="rlm" \
@@ -99,5 +105,5 @@ uv run --isolated --extra fsdp -v -m skyrl.train.entrypoints.main_base \
   trainer.resume_mode=null \
   trainer.log_path="$HOME/tmp/skyrl-logs" \
   trainer.ckpt_path="$HOME/tmp/ckpts/rlm_ckpt" \
-  environment.skyrl_gym.rlm.custom_system_prompt="\${oc.env:CUSTOM_SYSTEM_PROMPT}" \
+  environment.skyrl_gym.rlm.custom_system_prompt="$_YAML_PROMPT" \
   "$@"
