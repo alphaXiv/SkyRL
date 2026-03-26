@@ -15,6 +15,7 @@ Usage:
 import json
 import os
 import random
+import shutil
 from pathlib import Path
 
 import ray
@@ -41,6 +42,7 @@ SYSTEM_PROMPT = (
 )
 
 EVAL_MD_PATH = Path(__file__).parents[3] / "EVAL.md"
+THRESHOLDS = (4, 5, 6, 7)
 
 
 def get_sft_config() -> SkyRLTrainConfig:
@@ -56,7 +58,7 @@ def get_sft_config() -> SkyRLTrainConfig:
     cfg.trainer.algorithm.use_kl_in_reward = False
     cfg.trainer.policy.sequence_parallel_size = num_gpus
     cfg.trainer.logger = os.environ.get("LOGGER", "console")
-    cfg.trainer.micro_train_batch_size_per_gpu = 1
+    cfg.trainer.micro_train_batch_size_per_gpu = 4
 
     validate_cfg(cfg)
     return cfg
@@ -137,7 +139,7 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
     return batch
 
 
-def run_validation(dispatch, val_tokenized, tokenizer, batch_size, num_eval_samples=10000, threshold=5):
+def run_validation(dispatch, val_tokenized, tokenizer, batch_size, num_eval_samples=10000, thresholds=THRESHOLDS):
     sample = random.sample(val_tokenized, min(num_eval_samples, len(val_tokenized)))
 
     candidate_ids = [tokenizer.encode(str(i), add_special_tokens=False)[0] for i in range(10)]
@@ -168,41 +170,59 @@ def run_validation(dispatch, val_tokenized, tokenizer, batch_size, num_eval_samp
         correct_logp = logprobs[torch.arange(len(labels_t)), labels_t]
         total_loss += (-correct_logp.mean()).item()
 
-        all_preds.extend(int(p >= threshold) for p in preds)
-        all_labels.extend(int(ex["label"] >= threshold) for ex in batch_examples)
+        all_preds.extend(preds)
+        all_labels.extend(ex["label"] for ex in batch_examples)
 
     avg_loss = total_loss / max(num_batches, 1)
-
-    tp = sum(p == 1 and g == 1 for p, g in zip(all_preds, all_labels))
-    fp = sum(p == 1 and g == 0 for p, g in zip(all_preds, all_labels))
-    fn = sum(p == 0 and g == 1 for p, g in zip(all_preds, all_labels))
     n = len(all_preds)
-    pct_pred_1 = sum(all_preds) / n * 100 if n else 0.0
-    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+    avg_abs_dist = sum(abs(p - l) for p, l in zip(all_preds, all_labels)) / max(n, 1)
 
-    logger.info(
-        f"  pred_1%={pct_pred_1:.1f}%  precision={precision:.3f}  recall={recall:.3f}  f1={f1:.3f}"
-    )
+    logger.info(f"  avg_abs_distance={avg_abs_dist:.3f}")
 
-    return {
-        "loss": avg_loss,
-        "pct_pred_1": pct_pred_1,
-        "precision": precision,
-        "recall": recall,
-        "f1": f1,
-    }
+    result = {"loss": avg_loss, "avg_abs_dist": avg_abs_dist}
+    for t in thresholds:
+        bin_preds = [int(p >= t) for p in all_preds]
+        bin_labels = [int(l >= 6) for l in all_labels]
+        tp = sum(p == 1 and g == 1 for p, g in zip(bin_preds, bin_labels))
+        fp = sum(p == 1 and g == 0 for p, g in zip(bin_preds, bin_labels))
+        fn = sum(p == 0 and g == 1 for p, g in zip(bin_preds, bin_labels))
+        pct_pred_1 = sum(bin_preds) / n * 100 if n else 0.0
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+        result[f"t{t}/pct_pred_1"] = pct_pred_1
+        result[f"t{t}/precision"] = precision
+        result[f"t{t}/recall"] = recall
+        result[f"t{t}/f1"] = f1
+
+        logger.info(
+            f"  threshold={t}  pred_1%={pct_pred_1:.1f}%  precision={precision:.3f}  recall={recall:.3f}  f1={f1:.3f}"
+        )
+
+    return result
 
 
-def write_eval_md(eval_results):
+def write_eval_md(eval_results, thresholds=THRESHOLDS):
     with open(EVAL_MD_PATH, "w") as f:
         f.write("# Evaluation Results\n\n")
-        f.write("**Dataset:** alphaXiv/page-labels (validation split, 100 samples per eval)\n\n")
-        f.write("| Step | Val Loss | %Pred1 | Precision | Recall | F1 |\n")
-        f.write("|------|----------|--------|-----------|--------|------|\n")
+        f.write("**Dataset:** alphaXiv/page-labels (validation split)\n\n")
+        f.write("### Overall\n\n")
+        f.write("| Step | Val Loss | Avg Abs Dist |\n")
+        f.write("|------|----------|--------------|\n")
         for step, m in eval_results:
-            f.write(f"| {step} | {m['loss']:.4f} | {m['pct_pred_1']:.1f}% | {m['precision']:.3f} | {m['recall']:.3f} | {m['f1']:.3f} |\n")
+            f.write(f"| {step} | {m['loss']:.4f} | {m['avg_abs_dist']:.3f} |\n")
+        f.write("\n")
+        for t in thresholds:
+            f.write(f"### Threshold {t}\n\n")
+            f.write("| Step | Val Loss | %Pred1 | Precision | Recall | F1 |\n")
+            f.write("|------|----------|--------|-----------|--------|------|\n")
+            for step, m in eval_results:
+                f.write(
+                    f"| {step} | {m['loss']:.4f} | {m[f't{t}/pct_pred_1']:.1f}% "
+                    f"| {m[f't{t}/precision']:.3f} | {m[f't{t}/recall']:.3f} | {m[f't{t}/f1']:.3f} |\n"
+                )
+            f.write("\n")
 
 
 def main():
@@ -224,6 +244,7 @@ def main():
     batch_size = int(os.environ.get("BATCH_SIZE", "4"))
     num_steps = int(os.environ.get("NUM_STEPS", "500"))
     eval_interval = int(os.environ.get("EVAL_INTERVAL", "50"))
+    eval_batch_size = int(os.environ.get("EVAL_BATCH_SIZE", "64"))
     learning_rate = float(os.environ.get("LEARNING_RATE", "1e-6"))
 
     logger.info("Loading tokenizer...")
@@ -249,6 +270,7 @@ def main():
         {"input_ids": ex["input_ids"], "attention_mask": ex["attention_mask"], "num_actions": ex["num_actions"], "label": ex["label"]}
         for ex in train_mapped
     ]
+    random.shuffle(tokenized_train)
     logger.info(f"Train: kept {len(tokenized_train)}/{len(train_dataset)} examples")
 
     logger.info("Tokenizing validation dataset...")
@@ -286,6 +308,10 @@ def main():
     dispatch = WorkerDispatch(cfg, policy_actor_group=actor_group)
     dispatch.set_lr("policy", learning_rate)
 
+    save_dir = Path(os.environ.get("SAVE_DIR", "checkpoints")).resolve()
+    max_saved = 4
+    saved_dirs: list[Path] = []
+
     eval_results = []
     logger.info(f"Starting SFT training for {num_steps} steps (eval every {eval_interval}), lr={learning_rate}...")
     logger.info(f"Tokenized train set size: {len(tokenized_train)}")
@@ -305,20 +331,30 @@ def main():
 
         if step % eval_interval == 0 or step == num_steps - 1:
             logger.info(f"Running validation at step {step}...")
-            val_metrics = run_validation(dispatch, tokenized_val, tokenizer, batch_size)
-            tracker.log(
-                {
-                    "val/loss": val_metrics["loss"],
-                    "val/pct_pred_1": val_metrics["pct_pred_1"],
-                    "val/precision": val_metrics["precision"],
-                    "val/recall": val_metrics["recall"],
-                    "val/f1": val_metrics["f1"],
-                },
-                step=step,
-            )
+            val_metrics = run_validation(dispatch, tokenized_val, tokenizer, eval_batch_size)
+            log_dict = {"val/loss": val_metrics["loss"], "val/avg_abs_dist": val_metrics["avg_abs_dist"]}
+            for t in THRESHOLDS:
+                log_dict[f"val/t{t}/pct_pred_1"] = val_metrics[f"t{t}/pct_pred_1"]
+                log_dict[f"val/t{t}/precision"] = val_metrics[f"t{t}/precision"]
+                log_dict[f"val/t{t}/recall"] = val_metrics[f"t{t}/recall"]
+                log_dict[f"val/t{t}/f1"] = val_metrics[f"t{t}/f1"]
+            tracker.log(log_dict, step=step)
             eval_results.append((step, val_metrics))
             write_eval_md(eval_results)
-            logger.info(f"Step {step}: train_loss={train_loss:.4f}, val_loss={val_metrics['loss']:.4f}, f1={val_metrics['f1']:.3f}")
+            f1_summary = " ".join(f"f1@{t}={val_metrics[f't{t}/f1']:.3f}" for t in THRESHOLDS)
+            logger.info(f"Step {step}: train_loss={train_loss:.4f}, val_loss={val_metrics['loss']:.4f}, {f1_summary}")
+
+            step_dir = save_dir / f"step_{step}"
+            step_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Saving model to {step_dir}...")
+            dispatch.save_hf_model("policy", str(step_dir), tokenizer)
+            saved_dirs.append(step_dir)
+            while len(saved_dirs) > max_saved:
+                old = saved_dirs.pop(0)
+                if old.exists():
+                    logger.info(f"Removing old checkpoint {old}")
+                    shutil.rmtree(old)
+
 
     write_eval_md(eval_results)
     logger.info(f"SFT training complete! Results written to {EVAL_MD_PATH}")
