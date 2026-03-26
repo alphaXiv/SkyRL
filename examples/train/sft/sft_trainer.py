@@ -46,11 +46,17 @@ EVAL_MD_PATH = Path(__file__).parents[3] / "EVAL.md"
 def get_sft_config() -> SkyRLTrainConfig:
     cfg = SkyRLTrainConfig()
 
-    cfg.trainer.policy.model.path = "Qwen/Qwen3.5-2B-Base"
-    cfg.trainer.placement.policy_num_gpus_per_node = int(os.environ.get("NUM_GPUS", "1"))
-    cfg.generator.inference_engine.tensor_parallel_size = 1
+    num_gpus = int(os.environ.get("NUM_GPUS", "2"))
+
+    cfg.trainer.policy.model.path = "Qwen/Qwen3.5-4B-Base"
+    cfg.trainer.placement.policy_num_gpus_per_node = num_gpus
+    cfg.trainer.placement.colocate_all = False
+    cfg.trainer.placement.colocate_policy_ref = False
+    cfg.trainer.algorithm.use_kl_loss = False
+    cfg.trainer.algorithm.use_kl_in_reward = False
+    cfg.trainer.policy.sequence_parallel_size = num_gpus
     cfg.trainer.logger = os.environ.get("LOGGER", "console")
-    cfg.trainer.micro_train_batch_size_per_gpu = 2
+    cfg.trainer.micro_train_batch_size_per_gpu = 1
 
     validate_cfg(cfg)
     return cfg
@@ -280,7 +286,7 @@ def main():
         colocate_all=False,
         sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
     )
-    ray.get(actor_group.async_init_model(cfg.trainer.policy.model.path))
+    ray.get(actor_group.async_init_model(cfg.trainer.policy.model.path, freeze_vision_encoder=True))
 
     dispatch = WorkerDispatch(cfg, policy_actor_group=actor_group)
     dispatch.set_lr("policy", learning_rate)
