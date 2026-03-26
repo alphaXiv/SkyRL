@@ -55,15 +55,13 @@ uv run --isolated --extra fsdp -v -m skyrl.train.entrypoints.main_base \
   environment.env_class=rlm \
   generator.step_wise_trajectories=false \
   generator.max_turns=15 \
-  generator.batched=true \
+  generator.batched=false \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.policy.model.path="alphaXiv/rlm-sft-Qwen3.5-9B-v1" \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
-  trainer.policy.fsdp_config.wrap_policy.transformer_layer_cls_to_wrap="['Qwen3_5DecoderLayer']" \
-  trainer.ref.fsdp_config.wrap_policy.transformer_layer_cls_to_wrap="['Qwen3_5DecoderLayer']" \
   generator.inference_engine.num_engines=$NUM_GPUS \
   generator.inference_engine.tensor_parallel_size=1 \
   trainer.epochs=1 \

@@ -62,7 +62,7 @@ def main():
     parser.add_argument("--val_data_path",   default=os.path.join(_DATA_DIR, "qasper-validation-cleaned.json"))
     parser.add_argument("--test_data_path",  default=os.path.join(_DATA_DIR, "qasper-test-cleaned.json"))
     parser.add_argument("--n_train", type=int, default=None, help="Cap training examples (default: all)")
-    parser.add_argument("--n_val",   type=int, default=1,    help="Cap validation examples (default: 1)")
+    parser.add_argument("--n_val",   type=int, default=10,   help="Cap validation examples (default: 10)")
     parser.add_argument("--n_test",  type=int, default=None, help="Cap test examples (default: all)")
     parser.add_argument("--max_turns", type=int, default=10)
     parser.add_argument("--min_ctx_chars", type=int, default=0, help="Skip examples with context shorter than this")
