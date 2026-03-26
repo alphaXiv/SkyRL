@@ -60,7 +60,7 @@ uv run --extra fsdp -m skyrl.train.entrypoints.main_generate \
   generator.batched=false \
   trainer.policy.model.path="$MODEL_PATH" \
   trainer.placement.colocate_all=false \
-  trainer.max_prompt_length=512 \
+  trainer.max_prompt_length=32768 \
   generator.max_input_length=32768 \
   generator.inference_engine.engine_init_kwargs.language_model_only=true \
   generator.chat_template_kwargs.enable_thinking=false \

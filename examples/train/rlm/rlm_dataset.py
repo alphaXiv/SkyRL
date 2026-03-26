@@ -1,5 +1,11 @@
 """
-Create RLM dataset (parquet) from the QASPER dataset (data/qasper-train-cleaned.json).
+Create RLM dataset parquets from the three QASPER splits.
+
+Produces three files:
+  train.parquet      - full qasper-train-cleaned.json  (cap with --n_train)
+  validation.parquet - first --n_val rows of qasper-validation-cleaned.json
+                       (default 1; single example used to track rollout latency during training)
+  test.parquet       - full qasper-test-cleaned.json   (cap with --n_test)
 
 Each example:
 - prompt: "Find snippets of text that can be used to answer the query: <question>"
@@ -9,7 +15,7 @@ Each example:
 
 Run:
     uv run -- python examples/train/rlm/rlm_dataset.py --output_dir ~/data/rlm
-    uv run -- python examples/train/rlm/rlm_dataset.py --output_dir ~/data/rlm --n_val 100
+    uv run -- python examples/train/rlm/rlm_dataset.py --output_dir ~/data/rlm --n_val 200
 """
 
 import argparse
@@ -19,64 +25,71 @@ import sys
 
 import datasets
 
-# Resolve the data path relative to this file so it works from any cwd.
+# Resolve data paths relative to this file so it works from any cwd.
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.abspath(os.path.join(_HERE, "..", "..", ".."))
-_DEFAULT_DATA_PATH = os.path.join(_REPO_ROOT, "data", "qasper-train-cleaned.json")
+_DATA_DIR = os.path.join(_REPO_ROOT, "data")
+
+
+def load_json(path: str) -> list:
+    if not os.path.exists(path):
+        print(f"Error: file not found: {path}", file=sys.stderr)
+        sys.exit(1)
+    with open(path) as f:
+        return json.load(f)
+
+
+def convert(row: dict, max_turns: int) -> dict:
+    ctx = "\n\n".join(row["paragraphs"])
+    return {
+        "prompt": [{"role": "user", "content": f"Find snippets of text that can be used to answer the query: {row['question']}"}],
+        "env_class": "rlm",
+        "reward_spec": {
+            "ground_truth": None,
+            "evidence": row["evidence"],
+        },
+        "max_turns": max_turns,
+        "extra_info": {
+            "context_text": ctx,
+        },
+    }
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output_dir", default="~/data/rlm")
-    parser.add_argument("--data_path", default=_DEFAULT_DATA_PATH, help="Path to qasper-train-cleaned.json")
+    parser.add_argument("--train_data_path", default=os.path.join(_DATA_DIR, "qasper-train-cleaned.json"))
+    parser.add_argument("--val_data_path",   default=os.path.join(_DATA_DIR, "qasper-validation-cleaned.json"))
+    parser.add_argument("--test_data_path",  default=os.path.join(_DATA_DIR, "qasper-test-cleaned.json"))
     parser.add_argument("--n_train", type=int, default=None, help="Cap training examples (default: all)")
-    parser.add_argument("--n_val", type=int, default=None, help="Cap validation examples (default: all)")
-    parser.add_argument("--val_fraction", type=float, default=0.1, help="Fraction of data held out for validation (default: 0.1)")
+    parser.add_argument("--n_val",   type=int, default=1,    help="Cap validation examples (default: 1)")
+    parser.add_argument("--n_test",  type=int, default=None, help="Cap test examples (default: all)")
     parser.add_argument("--max_turns", type=int, default=10)
     parser.add_argument("--min_ctx_chars", type=int, default=0, help="Skip examples with context shorter than this")
     args = parser.parse_args()
     args.output_dir = os.path.expanduser(args.output_dir)
 
-    if not os.path.exists(args.data_path):
-        print(f"Error: data file not found: {args.data_path}", file=sys.stderr)
-        print("Run from the repo root or pass --data_path explicitly.", file=sys.stderr)
-        sys.exit(1)
-
-    with open(args.data_path) as f:
-        raw = json.load(f)
+    train_raw = load_json(args.train_data_path)
+    val_raw   = load_json(args.val_data_path)
+    test_raw  = load_json(args.test_data_path)
 
     if args.min_ctx_chars > 0:
-        before = len(raw)
-        raw = [r for r in raw if len("\n\n".join(r["paragraphs"])) >= args.min_ctx_chars]
-        print(f"Filtered {before} -> {len(raw)} rows (min_ctx_chars={args.min_ctx_chars})")
+        for name, raw in [("train", train_raw), ("val", val_raw), ("test", test_raw)]:
+            before = len(raw)
+            raw[:] = [r for r in raw if len("\n\n".join(r["paragraphs"])) >= args.min_ctx_chars]
+            print(f"Filtered {name}: {before} -> {len(raw)} rows (min_ctx_chars={args.min_ctx_chars})")
 
-    n_val = int(len(raw) * args.val_fraction)
-    val_raw = raw[:n_val]
-    train_raw = raw[n_val:]
-
-    if args.n_val is not None:
-        val_raw = val_raw[:args.n_val]
     if args.n_train is not None:
         train_raw = train_raw[:args.n_train]
-
-    def convert(row: dict) -> dict:
-        ctx = "\n\n".join(row["paragraphs"])
-        return {
-            "prompt": [{"role": "user", "content": f"Find snippets of text that can be used to answer the query: {row['question']}"}],
-            "env_class": "rlm",
-            "reward_spec": {
-                "ground_truth": None,
-                "evidence": row["evidence"],  # list of ground-truth text spans
-            },
-            "max_turns": args.max_turns,
-            "extra_info": {
-                "context_text": ctx,
-            },
-        }
+    if args.n_val is not None:
+        val_raw = val_raw[:args.n_val]
+    if args.n_test is not None:
+        test_raw = test_raw[:args.n_test]
 
     splits = {
-        "train": datasets.Dataset.from_list([convert(r) for r in train_raw]),
-        "validation": datasets.Dataset.from_list([convert(r) for r in val_raw]),
+        "train":      datasets.Dataset.from_list([convert(r, args.max_turns) for r in train_raw]),
+        "validation": datasets.Dataset.from_list([convert(r, args.max_turns) for r in val_raw]),
+        "test":       datasets.Dataset.from_list([convert(r, args.max_turns) for r in test_raw]),
     }
 
     n_show = 3
@@ -94,6 +107,7 @@ def main():
     for split_name, ds in splits.items():
         path = os.path.join(args.output_dir, f"{split_name}.parquet")
         ds.to_parquet(path)
+
     total = sum(len(ds) for ds in splits.values())
     print(f"\nWrote {len(splits)} splits ({total} total rows) to {args.output_dir}")
 
