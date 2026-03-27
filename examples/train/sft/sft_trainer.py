@@ -50,7 +50,7 @@ def get_sft_config() -> SkyRLTrainConfig:
 
     num_gpus = int(os.environ.get("NUM_GPUS", "2"))
 
-    cfg.trainer.policy.model.path = "Qwen/Qwen3.5-4B-Base"
+    cfg.trainer.policy.model.path = "Qwen/Qwen3.5-2B-Base"
     cfg.trainer.placement.policy_num_gpus_per_node = num_gpus
     cfg.trainer.placement.colocate_all = False
     cfg.trainer.placement.colocate_policy_ref = False
@@ -58,7 +58,7 @@ def get_sft_config() -> SkyRLTrainConfig:
     cfg.trainer.algorithm.use_kl_in_reward = False
     cfg.trainer.policy.sequence_parallel_size = num_gpus
     cfg.trainer.logger = os.environ.get("LOGGER", "console")
-    cfg.trainer.micro_train_batch_size_per_gpu = 4
+    cfg.trainer.micro_train_batch_size_per_gpu = 64
 
     validate_cfg(cfg)
     return cfg

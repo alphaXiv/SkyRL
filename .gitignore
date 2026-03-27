@@ -126,3 +126,7 @@ tx/tinker/alembic/__pycache__/
 
 # Other
 exports/
+
+# Checkpoints 
+checkpoints/
+checkpoints-4b/

@@ -7,12 +7,12 @@ set -x
 # bash examples/train/sft/run_sft.sh
 
 : "${LOGGER:=wandb}"
-: "${NUM_GPUS:=2}"
-: "${BATCH_SIZE:=16}"
+: "${NUM_GPUS:=8}"
+: "${BATCH_SIZE:=128}"
 : "${NUM_STEPS:=16000}"
 : "${MAX_LENGTH:=4096}"
-: "${EVAL_INTERVAL:=1000}"
-: "${EVAL_BATCH_SIZE:=64}"
+: "${EVAL_INTERVAL:=250}"
+: "${EVAL_BATCH_SIZE:=1024}"
 : "${WANDB_PROJECT:=alphaxiv-page-labels}"
 : "${WANDB_RUN_NAME:=sft-qwen3.5-4b-base}"
 

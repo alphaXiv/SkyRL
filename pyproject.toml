@@ -23,6 +23,7 @@ dependencies = [
     "peft",
     "hf_transfer",
     "cloudpathlib>=0.23.0",
+    "huggingface-hub>=1.7.1",
 ]
 
 [project.optional-dependencies]
