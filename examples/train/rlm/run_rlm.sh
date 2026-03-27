@@ -56,8 +56,8 @@ uv run --isolated --extra fsdp -v -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   environment.env_class=rlm \
-  generator.step_wise_trajectories=false \
-  generator.max_turns=15 \
+  generator.step_wise_trajectories=true \
+  generator.max_turns=10 \
   generator.batched=false \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.policy.model.path="alphaXiv/rlm-sft-Qwen3.5-9B-v1" \
@@ -94,7 +94,7 @@ uv run --isolated --extra fsdp -v -m skyrl.train.entrypoints.main_base \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
   generator.inference_engine.async_engine=true \
-  generator.inference_engine.gpu_memory_utilization=0.85 \
+  generator.inference_engine.gpu_memory_utilization=0.5 \
   generator.max_input_length=32768 \
   generator.inference_engine.engine_init_kwargs.language_model_only=true \
   generator.chat_template_kwargs.enable_thinking=false \
