@@ -56,7 +56,7 @@ uv run --isolated --extra fsdp -v -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   environment.env_class=rlm \
-  generator.step_wise_trajectories=true \
+  generator.step_wise_trajectories=false \
   generator.max_turns=10 \
   generator.batched=false \
   trainer.algorithm.advantage_estimator="grpo" \
@@ -94,7 +94,7 @@ uv run --isolated --extra fsdp -v -m skyrl.train.entrypoints.main_base \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
   generator.inference_engine.async_engine=true \
-  generator.inference_engine.gpu_memory_utilization=0.5 \
+  generator.inference_engine.gpu_memory_utilization=0.6 \
   generator.max_input_length=32768 \
   generator.inference_engine.engine_init_kwargs.language_model_only=true \
   generator.chat_template_kwargs.enable_thinking=false \
@@ -102,8 +102,11 @@ uv run --isolated --extra fsdp -v -m skyrl.train.entrypoints.main_base \
   trainer.logger="['console','wandb']" \
   trainer.project_name="rlm" \
   trainer.run_name="rlm_qasper_grpo" \
-  trainer.resume_mode=null \
+  trainer.resume_mode=from_path \
+  trainer.resume_path="$HOME/tmp/ckpts/rlm_ckpt/global_step_120" \
   trainer.log_path="$HOME/tmp/skyrl-logs" \
   trainer.ckpt_path="$HOME/tmp/ckpts/rlm_ckpt" \
+  trainer.export_path="$HOME/tmp/rlm_exports" \
+  trainer.dump_eval_results=true \
   environment.skyrl_gym.rlm.custom_system_prompt="$_YAML_PROMPT" \
   "$@"
