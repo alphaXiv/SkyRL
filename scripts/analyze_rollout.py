@@ -82,8 +82,21 @@ def truncate(text: str, max_chars: int) -> str:
     return text[:half] + c(f"\n  ... ({len(text) - max_chars:,} chars truncated) ...\n", "dim", "yellow") + text[-half:]
 
 
-def estimate_tokens(text: str) -> int:
-    """Rough token estimate: ~3.5 chars per token for English + markup."""
+_tokenizer = None
+
+DEFAULT_MODEL = "alphaXiv/rlm-sft-Qwen3.5-9B-v1"
+
+
+def load_tokenizer(model: str):
+    global _tokenizer
+    from transformers import AutoTokenizer
+
+    _tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
+
+
+def count_tokens(text: str) -> int:
+    if _tokenizer is not None:
+        return len(_tokenizer.encode(text, add_special_tokens=False))
     return max(1, int(len(text) / 3.5))
 
 
@@ -248,7 +261,7 @@ def print_step_wise_trajectory(traj_idx: int, steps: list[dict], max_response_ch
     repl_turns = [t for t in turns if t["role"] == "user" and t["content"].startswith("Code executed:")]
 
     total_response_chars = sum(len(s["output_response"]) for s in steps)
-    total_response_tokens = sum(estimate_tokens(s["output_response"]) for s in steps)
+    total_response_tokens = sum(count_tokens(s["output_response"]) for s in steps)
 
     print()
     print(c(f"  ╔{'═' * 86}╗", "bold", "cyan"))
@@ -284,16 +297,16 @@ def print_step_wise_trajectory(traj_idx: int, steps: list[dict], max_response_ch
 
     cumulative_tokens = 0
     for si, step in enumerate(steps):
-        prompt_tok = estimate_tokens(step["input_prompt"])
-        resp_tok = estimate_tokens(step["output_response"])
+        prompt_tok = count_tokens(step["input_prompt"])
+        resp_tok = count_tokens(step["output_response"])
         cumulative_tokens += resp_tok
         sr = step["stop_reason"]
         sr_colored = c(sr, "green") if sr == "stop" else c(sr, "yellow", "bold")
         print(f"  {si + 1:>6}  {prompt_tok:>8} tok  {resp_tok:>8} tok  {cumulative_tokens:>8} tok  {sr_colored:>19}")
 
     print()
-    init_prompt_tok = estimate_tokens(first["input_prompt"])
-    final_prompt_tok = estimate_tokens(last["input_prompt"])
+    init_prompt_tok = count_tokens(first["input_prompt"])
+    final_prompt_tok = count_tokens(last["input_prompt"])
     print(f"  {c('Initial prompt:', 'dim')}  ~{init_prompt_tok:,} tokens ({len(first['input_prompt']):,} chars)")
     print(f"  {c('Final prompt:', 'dim')}   ~{final_prompt_tok:,} tokens ({len(last['input_prompt']):,} chars)")
     print(f"  {c('Context size:', 'dim')}   {len(context_text):,} chars")
@@ -355,8 +368,8 @@ def print_rollout(idx: int, record: dict, max_response_chars: int, max_context_c
     assistant_turns = [t for t in turns if t["role"] == "assistant" and len(t["content"].strip()) > 10]
     repl_turns = [t for t in turns if t["role"] == "user" and t["content"].startswith("Code executed:")]
 
-    prompt_tok = estimate_tokens(prompt)
-    resp_tok = estimate_tokens(response)
+    prompt_tok = count_tokens(prompt)
+    resp_tok = count_tokens(response)
 
     print()
     print(c(f"  ╔{'═' * 86}╗", "bold", "cyan"))
@@ -423,24 +436,30 @@ def print_rollout(idx: int, record: dict, max_response_chars: int, max_context_c
 def group_step_wise_trajectories(records: list[dict]) -> list[list[dict]]:
     """Group step-wise records into trajectories.
 
-    Step-wise records for the same trajectory have growing input_prompt lengths
-    and share the same initial prompt. A new trajectory starts when the prompt
-    length resets (shrinks or equals the first record's prompt length).
+    Step-wise records for the same trajectory have strictly growing prompt
+    lengths AND share a common prefix with the first record in the group.
+    A new trajectory starts whenever the prompt doesn't extend the first
+    record's prompt (i.e. it's a different conversation entirely).
     """
     if not records:
         return []
 
     trajectories = []
     current: list[dict] = [records[0]]
+    first_prompt = records[0]["input_prompt"]
 
     for r in records[1:]:
-        prev_len = len(current[-1]["input_prompt"])
-        cur_len = len(r["input_prompt"])
-        if cur_len <= prev_len:
+        cur_prompt = r["input_prompt"]
+        extends_first = (
+            len(cur_prompt) > len(first_prompt)
+            and cur_prompt[:len(first_prompt)] == first_prompt
+        )
+        if extends_first:
+            current.append(r)
+        else:
             trajectories.append(current)
             current = [r]
-        else:
-            current.append(r)
+            first_prompt = cur_prompt
     if current:
         trajectories.append(current)
     return trajectories
@@ -453,7 +472,7 @@ def print_trajectory_summary(trajectories: list[list[dict]], all_prf: list[tuple
     for ti, steps in enumerate(trajectories):
         n_steps = len(steps)
         sr = steps[-1]["stop_reason"]
-        total_gen_tok = sum(estimate_tokens(s["output_response"]) for s in steps)
+        total_gen_tok = sum(count_tokens(s["output_response"]) for s in steps)
         extras = steps[0]["env_extras"]
         rs = extras.get("reward_spec", {})
         if isinstance(rs, str):
@@ -494,7 +513,14 @@ def main():
     parser.add_argument("--summary", action="store_true", help="Print a compact trajectory summary table with per-step lengths")
     parser.add_argument("--raw", action="store_true", help="Show raw per-record view instead of grouped trajectory view")
     parser.add_argument("--recompute-prf", action="store_true", help="Recompute precision/recall by re-executing REPL blocks (RLM env only)")
+    parser.add_argument("--model", type=str, default=DEFAULT_MODEL, help=f"HuggingFace model for tokenization (default: {DEFAULT_MODEL})")
+    parser.add_argument("--no-tokenizer", action="store_true", help="Skip loading the tokenizer; use a rough chars/3.5 estimate instead")
     args = parser.parse_args()
+
+    if not args.no_tokenizer:
+        print(c(f"  Loading tokenizer: {args.model} ...", "dim"), end="", flush=True)
+        load_tokenizer(args.model)
+        print(c(" done", "dim"))
 
     if not args.file.exists():
         print(c(f"Error: file not found: {args.file}", "red", "bold"))
@@ -535,8 +561,8 @@ def main():
                 rs = eval(rs)
             gt = rs.get("ground_truth", "?")
             score_str = _fmt_scores(r["score"])
-            p_tok = estimate_tokens(r["input_prompt"])
-            r_tok = estimate_tokens(r["output_response"])
+            p_tok = count_tokens(r["input_prompt"])
+            r_tok = count_tokens(r["output_response"])
             print(f"  {i:>4}  {r['stop_reason']:>8}  {str(gt):>6}  {r['env_class']:>6}  {score_str:>23}  {p_tok:>6} tok  {r_tok:>6} tok")
         print()
         return
@@ -549,18 +575,28 @@ def main():
                 print(f"    {'Step':>4}  {'Prompt':>10}  {'Response':>10}  {'Stop':>8}")
                 print(f"    {'─' * 4}  {'─' * 10}  {'─' * 10}  {'─' * 8}")
                 for si, s in enumerate(steps):
-                    p = estimate_tokens(s["input_prompt"])
-                    r = estimate_tokens(s["output_response"])
+                    p = count_tokens(s["input_prompt"])
+                    r = count_tokens(s["output_response"])
                     sr = s["stop_reason"]
                     sr_c = c(sr, "green") if sr == "stop" else c(sr, "yellow", "bold")
                     print(f"    {si + 1:>4}  {p:>6} tok  {r:>6} tok  {sr_c:>19}")
                 print()
         else:
+            print(f"  {'#':>4}  {'Turns':>18}  {'Tot Gen':>10}  {'Stop':>8}  {'Score'}")
+            print(f"  {'─' * 4}  {'─' * 18}  {'─' * 10}  {'─' * 8}  {'─' * 20}")
             for i in range(total):
                 r = records[i]
-                p = estimate_tokens(r["input_prompt"])
-                resp = estimate_tokens(r["output_response"])
-                print(f"  #{i}: prompt={p} tok  resp={resp} tok  stop={r['stop_reason']}")
+                full = r["input_prompt"] + r["output_response"]
+                turns = parse_prompt_turns(full)
+                n_sys = sum(1 for t in turns if t["role"] == "system")
+                n_usr = sum(1 for t in turns if t["role"] == "user")
+                n_ast = sum(1 for t in turns if t["role"] == "assistant")
+                resp_tok = count_tokens(r["output_response"])
+                sr = r["stop_reason"]
+                sr_c = c(sr, "green") if sr == "stop" else c(sr, "yellow", "bold")
+                score_str = _fmt_scores(r["score"])
+                turns_str = f"{n_sys}s {n_usr}u {n_ast}a"
+                print(f"  {i:>4}  {turns_str:>18}  {resp_tok:>6} tok  {sr_c:>19}  {score_str}")
             print()
         return
 
