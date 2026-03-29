@@ -12,6 +12,10 @@ set -x
 : "${LOGGER:=wandb}"
 : "${INFERENCE_BACKEND:=vllm}"
 
+# Increase Ray compiled-graph channel timeout (default 300s) to avoid false
+# timeouts when a rollout batch with max_turns=10 takes >5 minutes to generate.
+export RAY_CGRAPH_get_timeout="${RAY_CGRAPH_get_timeout:-900}"
+
 # QASPER system prompt (matches rlm/examples/eval.py).
 # Export CUSTOM_SYSTEM_PROMPT before running to override entirely.
 : "${CUSTOM_SYSTEM_PROMPT:=You are tasked with answering a query with associated context. You can access, transform, and analyze this context interactively in a REPL environment. You will be queried iteratively until you provide a final answer.
