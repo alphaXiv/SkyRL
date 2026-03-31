@@ -16,8 +16,8 @@ uv sync --extra fsdp
 # Activate virtual environment
 source .venv/bin/activate
 
-# Install libnuma-dev
-apt update && apt-get install build-essential libnuma-dev
+# Install libnuma-dev & tmux
+apt update && apt-get install build-essential libnuma-dev && apt install -y tmux
 
 # Install AWS
 apt update
