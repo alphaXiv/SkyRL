@@ -105,14 +105,18 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   generator.n_samples_per_prompt=8 \
   trainer.logger="['console','wandb']" \
   trainer.project_name="rlm" \
-  trainer.run_name="rlm_qasper_grpo" \
-  trainer.resume_mode=from_path \
-  trainer.resume_path="$HOME/tmp/ckpts/rlm_ckpt/global_step_120" \
+  trainer.run_name="rlm_qasper_grpo_leash" \
   trainer.log_path="$HOME/tmp/skyrl-logs" \
   trainer.ckpt_path="$HOME/tmp/ckpts/rlm_ckpt" \
   trainer.export_path="$HOME/tmp/rlm_exports" \
   trainer.dump_eval_results=true \
   environment.skyrl_gym.rlm.custom_system_prompt="$_YAML_PROMPT" \
+  trainer.algorithm.leash.use_leash=true \
+  trainer.algorithm.leash.lambda_init=0.2 \
+  trainer.algorithm.leash.lambda_lr=0.05 \
+  trainer.algorithm.leash.lambda_min=0.0 \
+  trainer.algorithm.leash.lambda_max=1.0 \
+  trainer.algorithm.leash.target_length=512 \
   "$@"
 
 # To enable LEASH adaptive length penalty, add these overrides:
