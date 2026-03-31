@@ -106,9 +106,9 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   trainer.logger="['console','wandb']" \
   trainer.project_name="rlm" \
   trainer.run_name="rlm_qasper_grpo_leash" \
-  trainer.log_path="$HOME/tmp/skyrl-logs" \
-  trainer.ckpt_path="$HOME/tmp/ckpts/rlm_ckpt" \
-  trainer.export_path="$HOME/tmp/rlm_exports" \
+  trainer.log_path="$(pwd)/.neer/artifacts/skyrl-logs" \
+  trainer.ckpt_path="$(pwd)/.neer/artifacts/ckpts/rlm_ckpt" \
+  trainer.export_path="$(pwd)/.neer/artifacts/rlm_exports" \
   trainer.dump_eval_results=true \
   environment.skyrl_gym.rlm.custom_system_prompt="$_YAML_PROMPT" \
   trainer.algorithm.leash.use_leash=true \
