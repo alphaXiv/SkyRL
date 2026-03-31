@@ -82,6 +82,7 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   trainer.micro_forward_batch_size_per_gpu=1 \
   trainer.micro_train_batch_size_per_gpu=1 \
   trainer.ckpt_interval=20 \
+  trainer.use_sample_packing=false \
   trainer.max_prompt_length=32768 \
   generator.sampling_params.max_generate_length=4096 \
   generator.eval_sampling_params.max_generate_length=4096 \

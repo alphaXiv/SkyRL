@@ -724,7 +724,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             # Close the environment
             await self._run_in_executor_if_available(env.close)
 
-        rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes)
+        rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes, loss_masks)
 
         if self.generator_cfg.apply_overlong_filtering:
             # set loss mask to 0 if the stop reason is not "stop"
@@ -853,7 +853,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         else:
             rollout_expert_indices = None
 
-        rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes)
+        rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes, loss_masks)
 
         if self.generator_cfg.zero_reward_on_non_stop:
             # set reward to 0 if the stop reason is not "stop"
