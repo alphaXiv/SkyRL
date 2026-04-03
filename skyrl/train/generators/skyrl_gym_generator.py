@@ -7,6 +7,7 @@ For details, see https://docs.skyrl.ai/docs/tutorials/skyrl_gym_generator
 
 import asyncio
 import copy
+import functools
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass

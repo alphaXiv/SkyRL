@@ -1,8 +1,8 @@
 # Initialize upstream git repo
 git init
 git remote add origin https://github.com/alphaXiv/SkyRL.git
-git fetch origin daniel/overlong
-git checkout -f -B daniel/overlong origin/daniel/overlong
+git fetch origin daniel/speed
+git checkout -f -B daniel/speed origin/daniel/speed
 
 # Set global git config 
 git config --global user.name "Daniel Kim" && git config --global user.email "sox8502@gmail.com"
@@ -19,15 +19,17 @@ source .venv/bin/activate
 # Install libnuma-dev & tmux
 apt update && apt-get install build-essential libnuma-dev && apt install -y tmux
 
+# Prepare dataset 
+python examples/train/rlm/rlm_dataset.py
+
 # Install AWS
+ORIGINAL_PATH=$(pwd)
+cd ~
 apt update
 apt install -y unzip curl
 curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
 unzip awscliv2.zip
 ./aws/install
 aws --version
+cd "$ORIGINAL_PATH"
 # Ideally I can do configuration here with env variables, not there yet
-
-# Prepare dataset 
-python examples/train/rlm/rlm_dataset.py
-

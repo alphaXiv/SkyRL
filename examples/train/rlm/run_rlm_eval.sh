@@ -5,12 +5,17 @@ set -x
 # 1. Create data: uv run -- python examples/train/rlm/rlm_dataset.py --output_dir $DATA_DIR
 # 2. Run: bash examples/train/rlm/run_rlm_eval.sh
 
+export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
+export VLLM_LOGGING_LEVEL=DEBUG
+
 : "${DATA_DIR:=$HOME/data/rlm}"
 : "${NUM_ENGINES:=1}"
-: "${TP_SIZE:=4}"
-: "${LOGGER:=console}"
+: "${TP_SIZE:=1}"
+: "${LOGGER:=wandb}"
 : "${INFERENCE_BACKEND:=vllm}"
 : "${MODEL_PATH:=alphaXiv/rlm-sft-Qwen3.5-9B-v1}"
+: "${WANDB_PROJECT:=rlm}"
+: "${WANDB_RUN_NAME:=rlm_eval}"
 
 # QASPER system prompt (matches rlm/examples/eval.py).
 # Export CUSTOM_SYSTEM_PROMPT before running to override entirely.
@@ -53,33 +58,43 @@ _YAML_PROMPT="${CUSTOM_SYSTEM_PROMPT//$_sq/$_sq$_sq}"
 _YAML_PROMPT="${_sq}${_YAML_PROMPT}${_sq}"
 
 uv run --extra fsdp -m skyrl.train.entrypoints.main_generate \
-  data.val_data="['$DATA_DIR/validation.parquet']" \
+  "data.val_data=['$DATA_DIR/validation.parquet']" \
   environment.env_class=rlm \
-  generator.step_wise_trajectories=true \
+  generator.step_wise_trajectories=false \
   generator.max_turns=10 \
   generator.batched=false \
   trainer.policy.model.path="$MODEL_PATH" \
   trainer.placement.colocate_all=false \
   trainer.max_prompt_length=32768 \
+  trainer.eval_batch_size=32 \
+  generator.inference_engine.ray_actor_max_concurrency=1000 \
   generator.max_input_length=32768 \
   generator.inference_engine.engine_init_kwargs.language_model_only=true \
+  generator.inference_engine.engine_init_kwargs.max_model_len=32768 \
+  generator.inference_engine.enforce_eager=false \
+  generator.eval_sampling_params.additional_kwargs.presence_penalty=1.5 \
   generator.chat_template_kwargs.enable_thinking=false \
-  generator.eval_sampling_params.max_generate_length=4096 \
-  generator.eval_sampling_params.temperature=0.7 \
-  generator.eval_sampling_params.top_p=0.8 \
-  generator.eval_sampling_params.top_k=20 \
+  generator.eval_sampling_params.max_generate_length=1024 \
+  generator.eval_sampling_params.temperature=0.0 \
+  generator.eval_sampling_params.top_p=1.0 \
   generator.eval_sampling_params.min_p=0.0 \
   generator.eval_sampling_params.repetition_penalty=1.0 \
-  generator.eval_sampling_params.additional_kwargs.presence_penalty=1.5 \
   generator.eval_n_samples_per_prompt=1 \
-  generator.inference_engine.backend=$INFERENCE_BACKEND \
-  generator.inference_engine.num_engines=$NUM_ENGINES \
-  generator.inference_engine.tensor_parallel_size=$TP_SIZE \
-  generator.inference_engine.gpu_memory_utilization=0.85 \
+  generator.inference_engine.backend="$INFERENCE_BACKEND" \
+  generator.inference_engine.num_engines="$NUM_ENGINES" \
+  generator.inference_engine.tensor_parallel_size="$TP_SIZE" \
+  generator.inference_engine.engine_init_kwargs.async_scheduling=true \
+  generator.inference_engine.gpu_memory_utilization=0.95 \
   trainer.dump_eval_results=true \
-  trainer.export_path="$HOME/SkyRL/tmp/rlm-eval" \
+  trainer.export_path="$HOME/exports" \
   trainer.logger="$LOGGER" \
-  trainer.project_name="rlm" \
-  trainer.run_name="rlm_eval" \
+  trainer.project_name="$WANDB_PROJECT" \
+  trainer.run_name="$WANDB_RUN_NAME" \
   environment.skyrl_gym.rlm.custom_system_prompt="$_YAML_PROMPT" \
   "$@"
+
+uv run --extra fsdp -- python examples/train/rlm/write_eval_summary.py \
+  --export-path "$HOME/exports" \
+  --wandb-project "$WANDB_PROJECT" \
+  --wandb-run-name "$WANDB_RUN_NAME" \
+  --output EVAL.md

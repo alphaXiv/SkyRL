@@ -492,6 +492,10 @@ class InferenceEngineConfig(BaseConfig):
     placement groups are created when ``"mp"`` is used."""
     engine_init_kwargs: Dict[str, Any] = field(default_factory=dict)
     """Pass-through kwargs for the vLLM engine. Names must match the engine's args."""
+    ray_actor_max_concurrency: int = 1
+    """Max concurrent calls into the Ray inference engine actor. Default 1 serializes calls, which
+    is safe during training (prevents weight updates from racing with generation). Set to a high
+    value (e.g. 1000) for eval-only runs to allow concurrent trajectory submissions to vLLM."""
     override_existing_update_group: str = "auto"
     """``"auto"``, ``"enable"``, or ``"disable"``."""
     external_proxy_url: Optional[str] = None

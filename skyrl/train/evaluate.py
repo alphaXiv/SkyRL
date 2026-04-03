@@ -61,6 +61,8 @@ async def evaluate(
     sampling_params = cfg.generator.eval_sampling_params
     total_generate_time = 0.0
     total_rollouts = 0
+    generation_wall_start: float | None = None
+    generation_wall_end: float = 0.0
     pbar = tqdm(total=len(eval_dataloader), initial=0, desc="Evaluation Progress")
     for _, prompts in enumerate(eval_dataloader):
         pbar.update(1)
@@ -73,8 +75,11 @@ async def evaluate(
             global_step,
         )
         t0 = time.perf_counter()
+        if generation_wall_start is None:
+            generation_wall_start = t0
         generator_output: GeneratorOutput = await generator.generate(generator_input)
-        total_generate_time += time.perf_counter() - t0
+        generation_wall_end = time.perf_counter()
+        total_generate_time += generation_wall_end - t0
         total_rollouts += len(generator_input["prompts"])
         validate_generator_output(len(generator_input["prompts"]), generator_output)
         generator_outputs.append(generator_output)
@@ -82,6 +87,7 @@ async def evaluate(
         concat_env_extras.extend(generator_input["env_extras"])
         concat_uids.extend(uids)
     concat_generator_outputs: GeneratorOutput = concatenate_generator_outputs(generator_outputs)
+    total_generation_wall_time = generation_wall_end - generation_wall_start if generation_wall_start is not None else 0.0
 
     # Extract data_sources from env_extras
     concat_data_sources = [env_extra.get("data_source") for env_extra in concat_env_extras]
@@ -106,6 +112,7 @@ async def evaluate(
             f"eval/all/pass_at_{cfg.generator.eval_n_samples_per_prompt}": overall_metrics["pass_at_n"],
             "eval/all/mean_positive_reward": overall_metrics["mean_positive_reward"],
             "eval/all/rollout_latency_s": total_generate_time / total_rollouts if total_rollouts > 0 else 0.0,
+            "eval/all/total_generation_time_s": total_generation_wall_time,
         }
     )
 
@@ -167,6 +174,8 @@ async def evaluate_step_wise(
     sampling_params = cfg.generator.eval_sampling_params
     total_generate_time = 0.0
     total_rollouts = 0
+    generation_wall_start: float | None = None
+    generation_wall_end: float = 0.0
     pbar = tqdm(total=len(eval_dataloader), initial=0, desc="Evaluation Progress")
     for _, prompts in enumerate(eval_dataloader):
         pbar.update(1)
@@ -179,8 +188,11 @@ async def evaluate_step_wise(
             global_step,
         )
         t0 = time.perf_counter()
+        if generation_wall_start is None:
+            generation_wall_start = t0
         generator_output: GeneratorOutput = await generator.generate(generator_input)
-        total_generate_time += time.perf_counter() - t0
+        generation_wall_end = time.perf_counter()
+        total_generate_time += generation_wall_end - t0
         total_rollouts += len(generator_input["prompts"])
         traj_id_to_input = {
             traj_id.instance_id: {"env_class": env_class, "env_extras": env_extra}
@@ -196,6 +208,7 @@ async def evaluate_step_wise(
         validate_generator_output(generator_input, generator_output, step_wise=True)
         generator_outputs.append(generator_output)
     concat_generator_outputs: GeneratorOutput = concatenate_generator_outputs(generator_outputs)
+    total_generation_wall_time = generation_wall_end - generation_wall_start if generation_wall_start is not None else 0.0
 
     # Extract data_sources from env_extras
     concat_data_sources = [env_extra.get("data_source") for env_extra in concat_env_extras]
@@ -224,12 +237,15 @@ async def evaluate_step_wise(
     )
     # 3. Calculate overall metrics across all datasets
     overall_metrics = get_metrics_from_generator_output(generator_output_last_step, uids_last_step)
+    num_trajectories = len(uids_last_step)
     eval_metrics.update(
         {
             "eval/all/avg_score": overall_metrics["avg_score"],
             f"eval/all/pass_at_{cfg.generator.eval_n_samples_per_prompt}": overall_metrics["pass_at_n"],
             "eval/all/mean_positive_reward": overall_metrics["mean_positive_reward"],
             "eval/all/rollout_latency_s": total_generate_time / total_rollouts if total_rollouts > 0 else 0.0,
+            "eval/all/per_trajectory_latency_s": total_generate_time / num_trajectories if num_trajectories > 0 else 0.0,
+            "eval/all/total_generation_time_s": total_generation_wall_time,
         }
     )
 

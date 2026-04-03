@@ -115,6 +115,7 @@ def create_ray_wrapped_inference_engines(
     enable_return_routed_experts: bool = False,
     served_model_name: str | None = None,
     distributed_executor_backend: str = "ray",
+    max_concurrency: int = 1,
 ) -> List[InferenceEngineInterface]:
     """
     Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface
@@ -280,6 +281,7 @@ def create_ray_wrapped_inference_engines(
                     num_cpus=num_gpus_per_actor,
                     num_gpus=num_gpus_per_actor,
                     scheduling_strategy=dp_rank_sched,
+                    max_concurrency=max_concurrency,
                 ).remote(
                     model=pretrain,
                     enforce_eager=enforce_eager,

@@ -1,0 +1,6 @@
+data/
+awscliv2.zip
+.git/objects/pack/
+.venv/
+__pycache__/
+*.egg-info/
