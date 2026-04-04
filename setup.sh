@@ -9,6 +9,7 @@ git config --global user.name "Daniel Kim" && git config --global user.email "so
 
 # Install uv
 curl -LsSf https://astral.sh/uv/install.sh | sh 
+source ~/.bashrc
 
 # Install dependencies
 uv sync --extra fsdp
