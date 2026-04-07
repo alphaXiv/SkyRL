@@ -148,7 +148,6 @@ class BasePPOExp:
         self.train_dataset = self.get_train_dataset()
         self.eval_dataset = self.get_eval_dataset()
         self.colocate_pg = self.get_colocate_pg()
-        self.child_colocate_pg = self.get_child_colocate_pg()
 
         # New inference resources (created lazily when _SKYRL_USE_NEW_INFERENCE=1)
         self._server_group = None
@@ -211,34 +210,18 @@ class BasePPOExp:
         per_engine_gpu_count = ie_cfg.tensor_parallel_size * ie_cfg.pipeline_parallel_size * ie_cfg.data_parallel_size
         total_gpu_slots = ie_cfg.num_engines * per_engine_gpu_count
 
-        pg = placement_group(
-            [{"GPU": 1, "CPU": 1}] * total_gpu_slots,
-            strategy="PACK",
-        )
-        get_ray_pg_ready_with_timeout(pg, timeout=timeout)
-        return ResolvedPlacementGroup(pg)
-
-    def get_child_colocate_pg(self, timeout: int = SKYRL_RAY_PG_TIMEOUT_IN_S) -> Optional[ResolvedPlacementGroup]:
-        """Initializes a placement group for the child (ref) inference engines.
-
-        Only created when ``generator.child_inference_engine`` is configured and
-        ``trainer.placement.colocate_all`` is enabled.  The child engines occupy their
-        own placement group (separate from the parent's) so Ray can schedule them
-        independently on the available GPUs.
-
-        Returns:
-            ResolvedPlacementGroup or None.
-        """
-        if not self.cfg.trainer.placement.colocate_all:
-            return None
+        # When a child engine is configured, include its GPU bundles in the same PG so
+        # the trainer's PPORayActorGroup sees a single PG whose bundle count matches
+        # world_size (parent slots + child slots).  Child engine creation uses a bundle
+        # offset to claim the second half of the PG.
         child_ie_cfg = self.cfg.generator.child_inference_engine
-        if child_ie_cfg is None:
-            return None
-
-        per_engine_gpu_count = (
-            child_ie_cfg.tensor_parallel_size * child_ie_cfg.pipeline_parallel_size * child_ie_cfg.data_parallel_size
-        )
-        total_gpu_slots = child_ie_cfg.num_engines * per_engine_gpu_count
+        if child_ie_cfg is not None:
+            child_per_engine_gpu_count = (
+                child_ie_cfg.tensor_parallel_size
+                * child_ie_cfg.pipeline_parallel_size
+                * child_ie_cfg.data_parallel_size
+            )
+            total_gpu_slots += child_ie_cfg.num_engines * child_per_engine_gpu_count
 
         pg = placement_group(
             [{"GPU": 1, "CPU": 1}] * total_gpu_slots,
@@ -247,7 +230,7 @@ class BasePPOExp:
         get_ray_pg_ready_with_timeout(pg, timeout=timeout)
         return ResolvedPlacementGroup(pg)
 
-    def get_child_inference_client(self, child_colocate_pg: Optional[ResolvedPlacementGroup]) -> Optional[InferenceEngineClient]:
+    def get_child_inference_client(self, colocate_pg: Optional[ResolvedPlacementGroup]) -> Optional[InferenceEngineClient]:
         """Creates an inference engine client for child RLM agents using frozen ref model weights.
 
         The child engine is loaded once from ``trainer.ref.model.path`` (which defaults to the
@@ -266,6 +249,12 @@ class BasePPOExp:
         # Child engine loads frozen weights from the ref model path (defaults to policy path).
         model_path = self.cfg.trainer.ref.model.path
 
+        # The child engines share the combined colocate_pg with the parent engines.
+        # Bundle indices [0 .. parent_slots-1] are for the parent; child engines start
+        # at parent_slots so they land on different physical GPUs.
+        ie_cfg = self.cfg.generator.inference_engine
+        parent_slots = ie_cfg.num_engines * ie_cfg.tensor_parallel_size * ie_cfg.pipeline_parallel_size * ie_cfg.data_parallel_size
+
         from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import (
             create_ray_wrapped_inference_engines,
         )
@@ -282,7 +271,7 @@ class BasePPOExp:
             "enforce_eager": child_ie_cfg.enforce_eager,
             "expert_parallel_size": child_ie_cfg.expert_parallel_size,
             "data_parallel_size": child_ie_cfg.data_parallel_size,
-            "shared_pg": child_colocate_pg,
+            "shared_pg": colocate_pg,
             "gpu_memory_utilization": child_ie_cfg.gpu_memory_utilization,
             "inference_engine_enable_sleep": self.cfg.trainer.placement.colocate_all,
             "async_engine": child_ie_cfg.async_engine,
@@ -294,6 +283,7 @@ class BasePPOExp:
             "enable_ray_prometheus_stats": child_ie_cfg.enable_ray_prometheus_stats,
             "enable_return_routed_experts": child_ie_cfg.enable_return_routed_experts,
             "distributed_executor_backend": child_ie_cfg.distributed_executor_backend,
+            "pg_bundle_offset": parent_slots,
         }
 
         child_engines = create_ray_wrapped_inference_engines(**engine_kwargs)
@@ -540,7 +530,7 @@ class BasePPOExp:
 
         inference_engine_client = self.get_inference_client()
 
-        child_inference_engine_client = self.get_child_inference_client(self.child_colocate_pg)
+        child_inference_engine_client = self.get_child_inference_client(self.colocate_pg)
 
         generator: GeneratorInterface = self.get_generator(
             self.cfg, self.tokenizer, inference_engine_client, child_inference_engine_client

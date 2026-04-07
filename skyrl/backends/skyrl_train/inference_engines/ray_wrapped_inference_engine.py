@@ -115,6 +115,7 @@ def create_ray_wrapped_inference_engines(
     enable_return_routed_experts: bool = False,
     served_model_name: str | None = None,
     distributed_executor_backend: str = "ray",
+    pg_bundle_offset: int = 0,
 ) -> List[InferenceEngineInterface]:
     """
     Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface
@@ -192,11 +193,11 @@ def create_ray_wrapped_inference_engines(
         tp_pp_size = tensor_parallel_size * pipeline_parallel_size
         for engine_idx in range(num_inference_engines):
             for dp_rank in range(data_parallel_size):
-                logical_base = engine_idx * per_engine_gpu_count + dp_rank * tp_pp_size
+                logical_base = pg_bundle_offset + engine_idx * per_engine_gpu_count + dp_rank * tp_pp_size
                 engine_gpu_ids_map[(engine_idx, dp_rank)] = [all_gpu_ids[logical_base + k] for k in range(tp_pp_size)]
 
     for i in range(num_inference_engines):
-        logical_base = i * per_engine_gpu_count
+        logical_base = pg_bundle_offset + i * per_engine_gpu_count
         base_pg_index = reordered[logical_base]
 
         # Get DP group rendezvous (addr, port) on the same node as DP rank 0 for this engine.

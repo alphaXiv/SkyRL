@@ -411,6 +411,14 @@ class RayPPOTrainer:
                 * ie_cfg.pipeline_parallel_size
                 * ie_cfg.data_parallel_size
             )
+            child_ie_cfg = cfg.generator.child_inference_engine
+            if child_ie_cfg is not None:
+                num_rollout_gpus += (
+                    child_ie_cfg.num_engines
+                    * child_ie_cfg.tensor_parallel_size
+                    * child_ie_cfg.pipeline_parallel_size
+                    * child_ie_cfg.data_parallel_size
+                )
             assert (
                 num_policy_gpus == num_rollout_gpus
             ), "num_policy_gpus and num_rollout_gpus must be the same when colocating all models"
