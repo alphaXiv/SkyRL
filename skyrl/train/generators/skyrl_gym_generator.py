@@ -235,16 +235,20 @@ class SkyRLGymGenerator(GeneratorInterface):
         skyrl_gym_cfg: SkyRLGymConfig,
         inference_engine_client: InferenceEngineClient,
         tokenizer,
+        child_inference_engine_client: Optional[InferenceEngineClient] = None,
     ):
         """
         Args:
             generator_cfg: GeneratorConfig object containing the generator configuration
             inference_engine_client: InferenceEngineClient object for interacting with the inference engines
             tokenizer: tokenizer object for encoding and decoding text
+            child_inference_engine_client: Optional separate client for child RLM agent generation.
+                When set, child agents use this frozen ref-model engine instead of the training policy.
         """
         self.generator_cfg = generator_cfg
         self.skyrl_gym_cfg = skyrl_gym_cfg
         self.inference_engine_client = inference_engine_client
+        self.child_inference_engine_client = child_inference_engine_client
         self.tokenizer = tokenizer
         self.max_turns = generator_cfg.max_turns
         self.batched = generator_cfg.batched
@@ -318,12 +322,18 @@ class SkyRLGymGenerator(GeneratorInterface):
         self,
         loop: asyncio.AbstractEventLoop,
         sampling_params: Optional[Dict[str, Any]],
+        client: Optional[InferenceEngineClient] = None,
     ) -> Callable[[List[str]], List[str]]:
-        """Build a sync callback that dispatches batched text prompts to the inference engine.
+        """Build a sync callback that dispatches batched text prompts to an inference engine.
 
         The callback can be called from a non-async thread (e.g. inside REPL exec()).
         It blocks until all responses are returned.
+
+        Args:
+            client: The inference engine client to use. Defaults to ``self.inference_engine_client``.
         """
+        _client = client if client is not None else self.inference_engine_client
+
         async def _generate(prompts: List[str]) -> List[str]:
             token_ids = [
                 self.tokenizer.apply_chat_template(
@@ -338,7 +348,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 prompt_token_ids=token_ids,
                 sampling_params=sampling_params,
             )
-            output = await self.inference_engine_client.generate(engine_input)
+            output = await _client.generate(engine_input)
             return output["responses"]
 
         def callback(prompts: List[str]) -> List[str]:
@@ -369,8 +379,10 @@ class SkyRLGymGenerator(GeneratorInterface):
             child_prompt = [{"role": "user", "content": prompt}]
             # Strip lm_callback/subcall_fn so the child cannot recurse further
             child_extras = {k: v for k, v in env_extras.items() if k not in ("lm_callback", "subcall_fn")}
-            # Re-inject lm_callback so the child can still call llm_query
-            child_extras["lm_callback"] = self._make_lm_callback(loop, sampling_params)
+            # Re-inject lm_callback so the child can still call llm_query.
+            # Use the dedicated child engine (frozen ref weights) when available.
+            child_client = self.child_inference_engine_client or self.inference_engine_client
+            child_extras["lm_callback"] = self._make_lm_callback(loop, sampling_params, client=child_client)
             # If a child-specific system prompt is configured, use it as the child's custom_system_prompt
             child_system_prompt = child_extras.pop("child_system_prompt", None)
             if child_system_prompt:

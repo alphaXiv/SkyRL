@@ -539,6 +539,9 @@ class GeneratorConfig(BaseConfig):
     step_wise_trajectories: bool = False
     train_child_trajectories: bool = False
     """Include child RLM agent trajectories in the training batch, with reward propagated from the parent."""
+    child_inference_engine: Optional[InferenceEngineConfig] = None
+    """If set, child RLM agents use a separate frozen inference engine (loaded from the ref model path)
+    instead of the main policy engine. This keeps child behavior stable as the parent policy trains."""
 
     def __post_init__(self):
 

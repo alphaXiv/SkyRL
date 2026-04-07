@@ -90,6 +90,7 @@ class RayPPOTrainer:
         generator: GeneratorInterface,
         colocate_pg: Optional[ResolvedPlacementGroup] = None,
         eval_dataset: Optional[PromptDataset] = None,
+        child_inference_engine_client: Optional[InferenceEngineClient] = None,
     ):
         self.cfg = cfg
         self.colocate_all = cfg.trainer.placement.colocate_all
@@ -98,6 +99,7 @@ class RayPPOTrainer:
         self.train_dataset = train_dataset
         self.eval_dataset = eval_dataset
         self.inference_engine_client = inference_engine_client
+        self.child_inference_engine_client = child_inference_engine_client
         self.generator = generator
         self.train_dataloader = None
         self.total_training_steps = None
@@ -190,6 +192,8 @@ class RayPPOTrainer:
         # Prepare weights for sampling
         with Timer("sync_weights"):
             await self.dispatch.save_weights_for_sampler()
+            if self.colocate_all and self.child_inference_engine_client is not None:
+                await self.child_inference_engine_client.wake_up()
 
         # Eval before training
         if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
@@ -243,6 +247,8 @@ class RayPPOTrainer:
                     if self.colocate_all:
                         # if we are not continuing sampling, we sleep the inference engine
                         await self.inference_engine_client.sleep()
+                        if self.child_inference_engine_client is not None:
+                            await self.child_inference_engine_client.sleep()
 
                     # 1.2 postprocess rewards
                     with Timer("postprocess_generator_output", self.all_timings):
@@ -315,6 +321,8 @@ class RayPPOTrainer:
                     # 10. Prepare weights for sampling
                     with Timer("sync_weights", self.all_timings):
                         await self.dispatch.save_weights_for_sampler()
+                        if self.colocate_all and self.child_inference_engine_client is not None:
+                            await self.child_inference_engine_client.wake_up()
 
                 # 11. set logs
                 logger.info(status)
@@ -346,6 +354,8 @@ class RayPPOTrainer:
         pbar.close()
         if self.colocate_all:
             await self.inference_engine_client.sleep()
+            if self.child_inference_engine_client is not None:
+                await self.child_inference_engine_client.sleep()
         if self.cfg.trainer.ckpt_interval > 0:
             with Timer("save_checkpoints", self.all_timings):
                 self.save_checkpoints()
