@@ -13,6 +13,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 export UV_CACHE_DIR UV_PROJECT_ENVIRONMENT
 
 : "${DATA_DIR:=$HOME/data/multi-paper}"
+: "${ROLLOUT_OUTPUT_DIR:=$(pwd)/.neer/artifacts/rollouts}"
 : "${NUM_ENGINES:=2}"
 : "${TP_SIZE:=4}"
 : "${TRAIN_GPUS:=8}"
@@ -28,7 +29,7 @@ uv run --extra fsdp -m skyrl.train.entrypoints.main_base \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   environment.env_class=rlm \
   generator.step_wise_trajectories=true \
-  generator.train_child_trajectories=false \
+  generator.train_child_trajectories=true \
   generator.max_turns=10 \
   generator.batched=false \
   trainer.algorithm.advantage_estimator="grpo" \
@@ -45,7 +46,7 @@ uv run --extra fsdp -m skyrl.train.entrypoints.main_base \
   trainer.eval_before_train=true \
   trainer.eval_interval=10 \
   trainer.update_epochs_per_batch=1 \
-  trainer.eval_batch_size=16 \
+  trainer.eval_batch_size=8 \
   trainer.train_batch_size=2 \
   trainer.policy_mini_batch_size=2 \
   trainer.micro_forward_batch_size_per_gpu=1 \
@@ -83,6 +84,7 @@ uv run --extra fsdp -m skyrl.train.entrypoints.main_base \
   trainer.dump_eval_results=true \
   environment.skyrl_gym.rlm.custom_system_prompt=multipaper \
   environment.skyrl_gym.rlm.child_system_prompt=multipaper_child \
+  environment.skyrl_gym.rlm.rollout_output_dir="$ROLLOUT_OUTPUT_DIR" \
   trainer.algorithm.leash.use_leash=true \
   trainer.algorithm.leash.lambda_init=0.2 \
   trainer.algorithm.leash.lambda_lr=0.05 \
