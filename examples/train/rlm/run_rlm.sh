@@ -33,7 +33,7 @@ uv run --extra fsdp -m skyrl.train.entrypoints.main_base \
   generator.max_turns=10 \
   generator.batched=false \
   trainer.algorithm.advantage_estimator="grpo" \
-  trainer.policy.model.path="alphaXiv/rlm-sft-multi-9b-v1" \
+  trainer.policy.model.path="alphaXiv/rlm-sft-multi-9b-step-250" \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
   trainer.placement.policy_num_gpus_per_node=$TRAIN_GPUS \
