@@ -382,6 +382,7 @@ generator:
 
   step_wise_trajectories: false
   train_child_trajectories: false
+  train_one_child: false
 
 environment:
   env_class: "gsm8k"

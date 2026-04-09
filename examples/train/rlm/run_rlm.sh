@@ -19,6 +19,7 @@ export UV_CACHE_DIR UV_PROJECT_ENVIRONMENT
 : "${TRAIN_GPUS:=8}"
 : "${LOGGER:=wandb}"
 : "${INFERENCE_BACKEND:=vllm}"
+: "${TRAIN_ONE_CHILD:=true}"
 
 # Increase Ray compiled-graph channel timeout (default 300s) to avoid false
 # timeouts when a rollout batch with max_turns=10 takes >5 minutes to generate.
@@ -30,6 +31,7 @@ uv run --extra fsdp -m skyrl.train.entrypoints.main_base \
   environment.env_class=rlm \
   generator.step_wise_trajectories=true \
   generator.train_child_trajectories=true \
+  generator.train_one_child=$TRAIN_ONE_CHILD \
   generator.max_turns=10 \
   generator.batched=false \
   trainer.algorithm.advantage_estimator="grpo" \
@@ -85,12 +87,6 @@ uv run --extra fsdp -m skyrl.train.entrypoints.main_base \
   environment.skyrl_gym.rlm.custom_system_prompt=multipaper \
   environment.skyrl_gym.rlm.child_system_prompt=multipaper_child \
   environment.skyrl_gym.rlm.rollout_output_dir="$ROLLOUT_OUTPUT_DIR" \
-  trainer.algorithm.leash.use_leash=true \
-  trainer.algorithm.leash.lambda_init=0.2 \
-  trainer.algorithm.leash.lambda_lr=0.05 \
-  trainer.algorithm.leash.lambda_min=0.0 \
-  trainer.algorithm.leash.lambda_max=1.0 \
-  trainer.algorithm.leash.target_length=512 \
   "$@"
 
 # To enable LEASH adaptive length penalty, add these overrides:

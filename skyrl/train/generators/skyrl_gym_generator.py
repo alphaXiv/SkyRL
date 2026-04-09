@@ -10,6 +10,7 @@ import copy
 import functools
 import json
 import os
+import random
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -221,6 +222,91 @@ def _write_rlm_rollout(
         f.write(json.dumps(parent_record, ensure_ascii=False, indent=2))
 
 
+def _compute_rlm_f1_metrics(
+    env_extras: Dict[str, Any],
+    dispatched_contexts: List[Optional[str]],
+    child_results: List["StepWiseOutput"],
+) -> Dict[str, float]:
+    """Compute parent paper-selection F1 and child evidence F1 for RLM trajectories.
+
+    Parent F1: set-level F1 between paper IDs dispatched to rlm_query_batched and the
+    ground-truth paper IDs that have evidence in reward_spec.
+
+    Child F1: for each child assigned a GT paper, score its final_answer against the
+    GT evidence for that paper using make_reward_fn, then average across those children.
+    """
+    reward_spec = env_extras.get("reward_spec", {}) or {}
+    evidence = reward_spec.get("evidence")
+    if not evidence or not isinstance(evidence, list):
+        return {}
+
+    # Parent context must be a dict {paper_id: paper_text} for multi-paper RLM
+    extra_info = env_extras.get("extra_info", {}) or {}
+    parent_context = extra_info.get("context_text")
+    if isinstance(parent_context, str):
+        try:
+            parent_context = json.loads(parent_context)
+        except Exception:
+            return {}
+    if not isinstance(parent_context, dict):
+        return {}
+
+    gt_paper_ids = {ev["paperId"] for ev in evidence if ev.get("paperId")}
+    if not gt_paper_ids:
+        return {}
+
+    # Reverse map: paper text -> paper ID (built once per trajectory)
+    paper_text_to_id = {text: pid for pid, text in parent_context.items()}
+    dispatched_paper_ids = [
+        paper_text_to_id.get(ctx) if ctx is not None else None
+        for ctx in dispatched_contexts
+    ]
+    dispatched_set = {pid for pid in dispatched_paper_ids if pid is not None}
+
+    # Parent paper-selection F1
+    tp = len(gt_paper_ids & dispatched_set)
+    fp = len(dispatched_set - gt_paper_ids)
+    fn = len(gt_paper_ids - dispatched_set)
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    parent_f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+    # Child evidence F1: score each child that was assigned a GT paper
+    from skyrl_gym.envs.rlm.evidence_tools import make_reward_fn
+
+    evidence_by_paper: Dict[str, List[str]] = {}
+    for ev in evidence:
+        pid = ev.get("paperId")
+        if pid:
+            evidence_by_paper[pid] = [s.get("text", "") for s in ev.get("selections", [])]
+
+    child_f1_scores = []
+    for paper_id, child_result in zip(dispatched_paper_ids, child_results):
+        if paper_id is None or paper_id not in gt_paper_ids:
+            continue
+        child_evidence = evidence_by_paper.get(paper_id, [])
+        if not child_evidence:
+            continue
+        child_env_metrics = child_result.env_metrics if isinstance(child_result.env_metrics, dict) else {}
+        child_final_answer = child_env_metrics.get("final_answer")
+        if not child_final_answer:
+            continue
+        paper_text = parent_context.get(paper_id, "")
+        reward_fn = make_reward_fn(paper_text, child_evidence)
+        child_f1_scores.append(reward_fn(str(child_final_answer)))
+
+    avg_child_f1 = sum(child_f1_scores) / len(child_f1_scores) if child_f1_scores else 0.0
+
+    return {
+        "parent_paper_f1": parent_f1,
+        "parent_paper_precision": precision,
+        "parent_paper_recall": recall,
+        "child_evidence_f1": avg_child_f1,
+        "num_dispatched_papers": float(len(dispatched_set)),
+        "num_gt_papers": float(len(gt_paper_ids)),
+    }
+
+
 class SkyRLGymGenerator(GeneratorInterface):
     def __init__(
         self,
@@ -349,6 +435,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         max_input_length: int,
         child_histories: Optional[List] = None,
         child_results: Optional[List] = None,
+        dispatched_contexts: Optional[List] = None,
     ) -> Callable[[str], str]:
         """Build a sync subcall_fn that runs a full child agent_loop (child RLMEnv).
 
@@ -400,6 +487,8 @@ class SkyRLGymGenerator(GeneratorInterface):
                 child_histories.append(child_chat_history)
             if child_results is not None and isinstance(result, StepWiseOutput):
                 child_results.append(result)
+                if dispatched_contexts is not None:
+                    dispatched_contexts.append(context)
             env_metrics = result.env_metrics if isinstance(result.env_metrics, dict) else {}
             return env_metrics.get("final_answer", "")
 
@@ -456,6 +545,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         # rlm_query. We only inject if not already present (allows caller to override).
         child_histories: Optional[List] = None
         child_results: List[StepWiseOutput] = []
+        dispatched_contexts: List[Optional[str]] = []
         if env_class == "rlm" and "lm_callback" not in env_extras:
             loop = asyncio.get_running_loop()
             env_extras = dict(env_extras)  # don't mutate caller's dict
@@ -466,6 +556,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 loop, env_extras, sampling_params, max_tokens, max_input_length,
                 child_histories=child_histories,
                 child_results=child_results,
+                dispatched_contexts=dispatched_contexts,
             )
 
         env_config = getattr(self.skyrl_gym_cfg, env_class, dict())
@@ -680,6 +771,12 @@ class SkyRLGymGenerator(GeneratorInterface):
         if env_class == "rlm" and hasattr(env, "set_chat_history"):
             env.set_chat_history(copy.deepcopy(agent_loop_state.chat_history))
         env_metrics = env.get_metrics()
+
+        # Compute and merge parent paper-selection F1 and child evidence F1.
+        if env_class == "rlm" and dispatched_contexts:
+            rlm_f1_metrics = _compute_rlm_f1_metrics(env_extras, dispatched_contexts, child_results)
+            if rlm_f1_metrics:
+                env_metrics = {**env_metrics, **rlm_f1_metrics}
 
         # Attach child results to the output before writing rollout files.
         if env_class == "rlm" and isinstance(agent_loop_output, StepWiseOutput):
@@ -1062,6 +1159,15 @@ class SkyRLGymGenerator(GeneratorInterface):
             is_last_step = []
             out_trajectory_ids = []
             out_env_classes = []
+            # Precompute random child selection once so arrays and logprobs stay aligned.
+            if self.generator_cfg.train_one_child:
+                selected_child_indices = [
+                    random.randrange(len(output.child_outputs)) if output.child_outputs else None
+                    for output in all_outputs
+                ]
+            else:
+                selected_child_indices = None
+
             for i, output in enumerate(all_outputs):
                 include_children_for_output = (
                     self.generator_cfg.train_child_trajectories
@@ -1073,7 +1179,11 @@ class SkyRLGymGenerator(GeneratorInterface):
                 # parent's trajectory_id).  They inherit the parent's GRPO
                 # advantage via the cumsum broadcast.
                 if include_children_for_output:
-                    for child_output in output.child_outputs:
+                    if selected_child_indices is not None and selected_child_indices[i] is not None:
+                        children_to_include = [output.child_outputs[selected_child_indices[i]]]
+                    else:
+                        children_to_include = output.child_outputs
+                    for child_output in children_to_include:
                         for step_output in child_output.step_outputs:
                             responses.append(step_output.response_ids)
                             rewards.append(step_output.reward)
@@ -1116,10 +1226,14 @@ class SkyRLGymGenerator(GeneratorInterface):
         if get_logprobs:
             if self.generator_cfg.step_wise_trajectories:
                 rollout_logprobs = []
-                for output in all_outputs:
+                for i, output in enumerate(all_outputs):
                     # Match flattening order: children first, then all parent steps
                     if self.generator_cfg.train_child_trajectories and include_children and output.child_outputs:
-                        for child in output.child_outputs:
+                        if selected_child_indices is not None and selected_child_indices[i] is not None:
+                            children_to_include = [output.child_outputs[selected_child_indices[i]]]
+                        else:
+                            children_to_include = output.child_outputs
+                        for child in children_to_include:
                             rollout_logprobs += [s.rollout_logprobs for s in child.step_outputs]
                     rollout_logprobs += [s.rollout_logprobs for s in output.step_outputs]
             else:

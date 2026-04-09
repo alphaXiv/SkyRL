@@ -539,6 +539,8 @@ class GeneratorConfig(BaseConfig):
     step_wise_trajectories: bool = False
     train_child_trajectories: bool = False
     """Include child RLM agent trajectories in the training batch, with reward propagated from the parent."""
+    train_one_child: bool = False
+    """When True and train_child_trajectories is enabled, randomly select one child per parent trajectory instead of training on all children."""
 
     def __post_init__(self):
 
