@@ -537,6 +537,13 @@ class GeneratorConfig(BaseConfig):
     """Can differ from the trainer's ``rope_scaling``, useful for thinking models."""
     rope_theta: Optional[float] = None
     step_wise_trajectories: bool = False
+    train_child_trajectories: bool = False
+    """Include child RLM agent trajectories in the training batch, with reward propagated from the parent."""
+    child_openrouter_model: Optional[str] = None
+    """When set, child RLM agents (depth >= 1) use this model via an OpenAI-compatible API instead of the
+    policy inference engine.  Requires the ``OPENROUTER_API_KEY`` environment variable."""
+    child_openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    """Base URL for the OpenAI-compatible chat completions endpoint used by child agents."""
 
     def __post_init__(self):
 
@@ -562,10 +569,16 @@ class GSM8kLLMJudgeEnvConfig(BaseConfig):
 class RLMEnvConfig(BaseConfig):
     """Configuration for the Recursive Language Model environment."""
 
-    repl_timeout: float = 15.0
-    """Timeout in seconds for each REPL code execution."""
+    repl_timeout: float = 60.0
+    """Timeout in seconds for each REPL code execution (used for child agents)."""
+    parent_repl_timeout: float = 180.0
+    """Timeout in seconds for parent REPL execution (needs to be longer to accommodate child RLM calls)."""
     custom_system_prompt: Optional[str] = None
     """Custom system prompt that fully replaces the default RLM system prompt."""
+    child_system_prompt: Optional[str] = None
+    """Custom system prompt for child RLM agents spawned via rlm_query(). Defaults to None (inherits parent prompt)."""
+    rollout_output_dir: Optional[str] = None
+    """Directory to write per-example rollout files (parent.txt, child-N.txt, meta.json). None disables logging."""
 
 
 @dataclass
