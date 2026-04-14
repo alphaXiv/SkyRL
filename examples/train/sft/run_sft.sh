@@ -15,6 +15,11 @@ set -x
 : "${EVAL_BATCH_SIZE:=1024}"
 : "${WANDB_PROJECT:=alphaxiv-page-labels}"
 : "${WANDB_RUN_NAME:=sft-qwen3.5-4b-base}"
+: "${LORA_RANK:=16}"
+: "${LORA_ALPHA:=64}"
+: "${LORA_DROPOUT:=0.0}"
+: "${LORA_TARGET_MODULES:=all-linear}"
+: "${LORA_EXCLUDE_MODULES:=}"
 
 
 

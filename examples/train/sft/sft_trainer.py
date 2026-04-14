@@ -60,6 +60,15 @@ def get_sft_config() -> SkyRLTrainConfig:
     cfg.trainer.logger = os.environ.get("LOGGER", "console")
     cfg.trainer.micro_train_batch_size_per_gpu = 64
 
+    lora_rank = int(os.environ.get("LORA_RANK", "0"))
+    if lora_rank > 0:
+        cfg.trainer.policy.model.lora.rank = lora_rank
+        cfg.trainer.policy.model.lora.alpha = int(os.environ.get("LORA_ALPHA", lora_rank))
+        cfg.trainer.policy.model.lora.dropout = float(os.environ.get("LORA_DROPOUT", "0.0"))
+        cfg.trainer.policy.model.lora.target_modules = os.environ.get("LORA_TARGET_MODULES", "all-linear")
+        lora_exclude_modules = os.environ.get("LORA_EXCLUDE_MODULES")
+        cfg.trainer.policy.model.lora.exclude_modules = lora_exclude_modules if lora_exclude_modules else None
+
     validate_cfg(cfg)
     return cfg
 
@@ -228,6 +237,18 @@ def write_eval_md(eval_results, thresholds=THRESHOLDS):
 def main():
     cfg = get_sft_config()
     initialize_ray(cfg)
+
+    if cfg.trainer.policy.model.lora.rank > 0:
+        logger.info(
+            "LoRA enabled: rank={} alpha={} dropout={} target_modules={} exclude_modules={}",
+            cfg.trainer.policy.model.lora.rank,
+            cfg.trainer.policy.model.lora.alpha,
+            cfg.trainer.policy.model.lora.dropout,
+            cfg.trainer.policy.model.lora.target_modules,
+            cfg.trainer.policy.model.lora.exclude_modules,
+        )
+    else:
+        logger.info("LoRA disabled (LORA_RANK=0)")
 
     logger_backend = os.environ.get("LOGGER", "console")
     project_name = os.environ.get("WANDB_PROJECT", "alphaxiv-page-labels")
