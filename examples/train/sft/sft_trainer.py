@@ -21,7 +21,6 @@ from pathlib import Path
 import ray
 import torch
 from datasets import load_dataset
-from datasets.exceptions import DatasetNotFoundError
 from loguru import logger
 from transformers import AutoTokenizer
 from tqdm import tqdm
@@ -46,36 +45,12 @@ EVAL_MD_PATH = Path(__file__).parents[3] / "EVAL.md"
 THRESHOLDS = (4, 5, 6, 7)
 
 
-def env_flag(name: str, default: bool = False) -> bool:
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def get_hf_token() -> str | None:
-    return os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
-
-
-def load_page_labels_dataset(split: str, token: str | None):
-    try:
-        return load_dataset("alphaXiv/page-labels", split=split, token=token)
-    except DatasetNotFoundError as exc:
-        if token:
-            raise
-        raise RuntimeError(
-            "Dataset 'alphaXiv/page-labels' could not be accessed. "
-            "If it is private or gated, export HF_TOKEN or HUGGINGFACE_HUB_TOKEN before running the script."
-        ) from exc
-
-
 def get_sft_config() -> SkyRLTrainConfig:
     cfg = SkyRLTrainConfig()
 
     num_gpus = int(os.environ.get("NUM_GPUS", "2"))
-    micro_batch_size = int(os.environ.get("MICRO_BATCH_SIZE", "128"))
 
-    cfg.trainer.policy.model.path = "Qwen/Qwen3.5-0.8B-Base"
+    cfg.trainer.policy.model.path = "Qwen/Qwen3.5-2B-Base"
     cfg.trainer.placement.policy_num_gpus_per_node = num_gpus
     cfg.trainer.placement.colocate_all = False
     cfg.trainer.placement.colocate_policy_ref = False
@@ -83,7 +58,7 @@ def get_sft_config() -> SkyRLTrainConfig:
     cfg.trainer.algorithm.use_kl_in_reward = False
     cfg.trainer.policy.sequence_parallel_size = num_gpus
     cfg.trainer.logger = os.environ.get("LOGGER", "console")
-    cfg.trainer.micro_train_batch_size_per_gpu = micro_batch_size
+    cfg.trainer.micro_train_batch_size_per_gpu = 64
 
     validate_cfg(cfg)
     return cfg
@@ -253,11 +228,10 @@ def write_eval_md(eval_results, thresholds=THRESHOLDS):
 def main():
     cfg = get_sft_config()
     initialize_ray(cfg)
-    hf_token = get_hf_token()
 
     logger_backend = os.environ.get("LOGGER", "console")
     project_name = os.environ.get("WANDB_PROJECT", "alphaxiv-page-labels")
-    run_name = os.environ.get("WANDB_RUN_NAME", "sft-qwen3.5-0.8b")
+    run_name = os.environ.get("WANDB_RUN_NAME", "sft-qwen2.5-0.5b")
 
     tracker = Tracking(
         project_name=project_name,
@@ -271,19 +245,16 @@ def main():
     num_steps = int(os.environ.get("NUM_STEPS", "500"))
     eval_interval = int(os.environ.get("EVAL_INTERVAL", "50"))
     eval_batch_size = int(os.environ.get("EVAL_BATCH_SIZE", "64"))
-    num_eval_samples = int(os.environ.get("NUM_EVAL_SAMPLES", "2048"))
-    save_interval = int(os.environ.get("SAVE_INTERVAL", "1000"))
-    skip_initial_eval = env_flag("SKIP_INITIAL_EVAL", default=True)
     learning_rate = float(os.environ.get("LEARNING_RATE", "1e-6"))
 
     logger.info("Loading tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(cfg.trainer.policy.model.path, token=hf_token)
+    tokenizer = AutoTokenizer.from_pretrained(cfg.trainer.policy.model.path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     logger.info("Loading dataset...")
-    train_dataset = load_page_labels_dataset("train", hf_token)
-    val_dataset = load_page_labels_dataset("validation", hf_token)
+    train_dataset = load_dataset("alphaXiv/page-labels", split="train")
+    val_dataset = load_dataset("alphaXiv/page-labels", split="validation")
 
     num_workers = min(os.cpu_count() or 1, 8)
 
@@ -342,10 +313,7 @@ def main():
     saved_dirs: list[Path] = []
 
     eval_results = []
-    logger.info(
-        f"Starting SFT training for {num_steps} steps (eval every {eval_interval}, save every {save_interval}), "
-        f"lr={learning_rate}, micro_batch_size={cfg.trainer.micro_train_batch_size_per_gpu}..."
-    )
+    logger.info(f"Starting SFT training for {num_steps} steps (eval every {eval_interval}), lr={learning_rate}...")
     logger.info(f"Tokenized train set size: {len(tokenized_train)}")
 
     for step in tqdm(range(num_steps)):
@@ -361,16 +329,9 @@ def main():
         train_loss = metrics.get("final_loss", metrics.get("loss", 0.0))
         tracker.log({"train/loss": train_loss, "train/grad_norm": grad_norm}, step=step)
 
-        should_run_eval = step == num_steps - 1 or (step % eval_interval == 0 and (step != 0 or not skip_initial_eval))
-        if should_run_eval:
+        if step % eval_interval == 0 or step == num_steps - 1:
             logger.info(f"Running validation at step {step}...")
-            val_metrics = run_validation(
-                dispatch,
-                tokenized_val,
-                tokenizer,
-                eval_batch_size,
-                num_eval_samples=num_eval_samples,
-            )
+            val_metrics = run_validation(dispatch, tokenized_val, tokenizer, eval_batch_size)
             log_dict = {"val/loss": val_metrics["loss"], "val/avg_abs_dist": val_metrics["avg_abs_dist"]}
             for t in THRESHOLDS:
                 log_dict[f"val/t{t}/pct_pred_1"] = val_metrics[f"t{t}/pct_pred_1"]
@@ -383,18 +344,16 @@ def main():
             f1_summary = " ".join(f"f1@{t}={val_metrics[f't{t}/f1']:.3f}" for t in THRESHOLDS)
             logger.info(f"Step {step}: train_loss={train_loss:.4f}, val_loss={val_metrics['loss']:.4f}, {f1_summary}")
 
-            should_save = save_interval > 0 and (step == num_steps - 1 or step % save_interval == 0)
-            if should_save:
-                step_dir = save_dir / f"step_{step}"
-                step_dir.mkdir(parents=True, exist_ok=True)
-                logger.info(f"Saving model to {step_dir}...")
-                dispatch.save_hf_model("policy", str(step_dir), tokenizer)
-                saved_dirs.append(step_dir)
-                while len(saved_dirs) > max_saved:
-                    old = saved_dirs.pop(0)
-                    if old.exists():
-                        logger.info(f"Removing old checkpoint {old}")
-                        shutil.rmtree(old)
+            step_dir = save_dir / f"step_{step}"
+            step_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Saving model to {step_dir}...")
+            dispatch.save_hf_model("policy", str(step_dir), tokenizer)
+            saved_dirs.append(step_dir)
+            while len(saved_dirs) > max_saved:
+                old = saved_dirs.pop(0)
+                if old.exists():
+                    logger.info(f"Removing old checkpoint {old}")
+                    shutil.rmtree(old)
 
 
     write_eval_md(eval_results)
