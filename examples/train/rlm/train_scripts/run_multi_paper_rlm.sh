@@ -3,7 +3,7 @@ set -x
 # Multi-paper RLM training with parent/child orchestration.
 # The root agent (depth 0) coordinates by dispatching child agents to individual papers.
 #
-# 1. Create data: uv run -- python examples/train/rlm/datasets/rlm_dataset_synthetic_multi.py --output_dir $DATA_DIR
+# 1. Create data: uv run --python 3.12 -- python examples/train/rlm/datasets/rlm_dataset_synthetic_multi.py --output_dir $DATA_DIR
 # 2. Run: bash examples/train/rlm/train_scripts/run_multi_paper_rlm.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
