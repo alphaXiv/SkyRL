@@ -14,13 +14,16 @@ export UV_CACHE_DIR UV_PROJECT_ENVIRONMENT
 
 : "${DATA_DIR:=$HOME/data/rlm-synthetic-multi}"
 
-if [ ! -d "$DATA_DIR" ] || [ -z "$(ls -A "$DATA_DIR" 2>/dev/null)" ]; then
-  echo "DATA_DIR '$DATA_DIR' is empty or missing — downloading alphaXiv/rlm-data-split from HuggingFace..."
+if [ ! -f "$DATA_DIR/train.parquet" ] || [ ! -f "$DATA_DIR/validation.parquet" ]; then
+  echo "Data files missing — downloading alphaXiv/rlm-data-split from HuggingFace..."
   mkdir -p "$DATA_DIR"
-  uv run --python 3.12 -c "
+  uv run --python 3.12 python -c "
 from huggingface_hub import snapshot_download
 snapshot_download(repo_id='alphaXiv/rlm-data-split', repo_type='dataset', local_dir='$DATA_DIR')
 "
+  # HF stores files under data/ with shard suffixes — rename to what the trainer expects
+  mv -f "$DATA_DIR/data/train-"*.parquet "$DATA_DIR/train.parquet"
+  mv -f "$DATA_DIR/data/validation-"*.parquet "$DATA_DIR/validation.parquet"
 fi
 
 : "${NUM_ENGINES:=2}"
