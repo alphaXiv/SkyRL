@@ -13,6 +13,16 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 export UV_CACHE_DIR UV_PROJECT_ENVIRONMENT
 
 : "${DATA_DIR:=$HOME/data/rlm-synthetic-multi}"
+
+if [ ! -d "$DATA_DIR" ] || [ -z "$(ls -A "$DATA_DIR" 2>/dev/null)" ]; then
+  echo "DATA_DIR '$DATA_DIR' is empty or missing — downloading alphaXiv/rlm-data-split from HuggingFace..."
+  mkdir -p "$DATA_DIR"
+  uv run --python 3.12 -c "
+from huggingface_hub import snapshot_download
+snapshot_download(repo_id='alphaXiv/rlm-data-split', repo_type='dataset', local_dir='$DATA_DIR')
+"
+fi
+
 : "${NUM_ENGINES:=2}"
 : "${TP_SIZE:=4}"
 : "${TRAIN_GPUS:=8}"
