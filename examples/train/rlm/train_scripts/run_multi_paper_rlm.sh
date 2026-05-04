@@ -30,7 +30,7 @@ uv run --extra fsdp --python 3.12 -m examples.train.rlm.main_rlm \
   generator.max_turns=6 \
   generator.batched=false \
   trainer.algorithm.advantage_estimator="grpo" \
-  trainer.policy.model.path="alphaXiv/evidence-multi-rlm-sft-2b" \
+  trainer.policy.model.path="alphaXiv/evidence-multi-rlm-sft-4b" \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
   trainer.placement.policy_num_gpus_per_node=$TRAIN_GPUS \
@@ -43,7 +43,7 @@ uv run --extra fsdp --python 3.12 -m examples.train.rlm.main_rlm \
   trainer.eval_before_train=true \
   trainer.eval_interval=10 \
   trainer.update_epochs_per_batch=1 \
-  trainer.eval_batch_size=16 \
+  trainer.eval_batch_size=8 \
   trainer.train_batch_size=4 \
   trainer.policy_mini_batch_size=4 \
   trainer.micro_forward_batch_size_per_gpu=2 \
