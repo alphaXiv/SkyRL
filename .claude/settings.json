@@ -1,7 +1,24 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python3)"
+      "Bash(python3)",
+      "Bash(python3 -c \"from transformers import AutoConfig; help\\(AutoConfig.from_pretrained\\)\")",
+      "Bash(find /neer/artifacts -type d -name \"global_step_130\" 2>/dev/null | head -5)",
+      "Read(//neer/**)",
+      "Bash(findmnt /venv)",
+      "Read(//proc/12308/net/**)",
+      "Bash(awk 'NR>2 {print $1, \"RX:\", $2, \"TX:\", $10}')",
+      "Read(//venv/**)",
+      "Bash(mount)",
+      "Bash(curl -o /dev/null -s -w \"speed: %{speed_download} bytes/s, time: %{time_total}s\\\\n\" --max-time 10 https://files.pythonhosted.org/robots.txt)",
+      "Bash(curl -o /dev/null -s -w \"speed: %{speed_download} bytes/s\\\\n\" --max-time 15 \"https://files.pythonhosted.org/packages/source/p/pip/pip-24.0.tar.gz\")",
+      "Bash(stat -f /venv 2>/dev/null; cat /proc/mounts | grep -E \"venv|overlay|fuse\" ; ls /sys/class/block/ 2>/dev/null | head -10)",
+      "Read(//proc/12308/**)",
+      "Read(//sys/class/block/**)",
+      "Bash(# Check where docker overlay upper layer lives and what backing device it uses *)",
+      "Read(//var/lib/docker/**)",
+      "Bash(dd if=/dev/zero of=/venv/testwrite bs=64M count=1 oflag=direct)",
+      "Bash(rm /venv/testwrite)"
     ]
   }
 }
