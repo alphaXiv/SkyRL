@@ -1,6 +1,7 @@
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List
+import time
 
 import torch
 from loguru import logger
@@ -161,8 +162,10 @@ async def evaluate_step_wise(
     concat_uids: List[str] = []
     sampling_params = cfg.generator.eval_sampling_params
     pbar = tqdm(total=len(eval_dataloader), initial=0, desc="Evaluation Progress")
-    for _, prompts in enumerate(eval_dataloader):
+    eval_start = time.time()
+    for batch_idx, prompts in enumerate(eval_dataloader):
         pbar.update(1)
+        batch_start = time.time()
         generator_input, uids = prepare_generator_input(
             prompts,
             cfg.generator.eval_n_samples_per_prompt,
@@ -185,6 +188,32 @@ async def evaluate_step_wise(
             concat_uids.append(traj_id.instance_id)
         validate_generator_output(generator_input, generator_output, step_wise=True)
         generator_outputs.append(generator_output)
+
+        batch_elapsed = time.time() - batch_start
+        total_elapsed = time.time() - eval_start
+        is_last = generator_output.get("is_last_step", [])
+        env_metrics_list = generator_output.get("env_metrics") or []
+        last_step_metrics = [
+            em for em, last in zip(env_metrics_list, is_last) if last and em
+        ]
+        batch_rewards = [
+            float(sum(r) if isinstance(r, (list, tuple)) else r)
+            for r, last in zip(generator_output["rewards"], is_last) if last
+        ]
+        n_done = batch_idx + 1
+        n_total = len(eval_dataloader)
+        avg_reward = sum(batch_rewards) / len(batch_rewards) if batch_rewards else float("nan")
+        precisions = [m["judge_precision"] for m in last_step_metrics if "judge_precision" in m]
+        recalls = [m["judge_recall"] for m in last_step_metrics if "judge_recall" in m]
+        submitted = [m for m in last_step_metrics if m.get("final_value_set")]
+        avg_p = sum(precisions) / len(precisions) if precisions else float("nan")
+        avg_r = sum(recalls) / len(recalls) if recalls else float("nan")
+        logger.info(
+            f"[eval {n_done}/{n_total}] reward={avg_reward:.3f}  "
+            f"precision={avg_p:.3f}  recall={avg_r:.3f}  "
+            f"submitted={len(submitted)}/{len(last_step_metrics)}  "
+            f"batch={batch_elapsed:.1f}s  total={total_elapsed:.1f}s"
+        )
     concat_generator_outputs: GeneratorOutput = concatenate_generator_outputs(generator_outputs)
 
     # Extract data_sources from env_extras

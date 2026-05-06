@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import json
+import os
 import threading
 import uuid
 from dataclasses import dataclass
@@ -177,6 +178,10 @@ class RLMGymGenerator(SkyRLGymGenerator):
             agent_loop_output.step_outputs[-1].env_metrics["is_trajectory_boundary"] = True
 
         ctx.output = agent_loop_output
+
+        dump_dir = getattr(self.generator_cfg, "rollout_dump_dir", None)
+        if dump_dir:
+            self._dump_rollout(ctx, agent_loop_output, dump_dir)
 
         # Non-root: parent/root will inline us later.
         if ctx.parent_rid is not None:
@@ -371,3 +376,57 @@ class RLMGymGenerator(SkyRLGymGenerator):
                 )
                 self.active_rollouts[rid] = ctx
         return ctx
+
+    def _dump_rollout(
+        self,
+        ctx: "_RLMRolloutContext",
+        output: "StepWiseOutput",
+        dump_dir: str,
+    ) -> None:
+        """Write a decoded rollout to disk immediately after it completes."""
+        traj_id = ctx.trajectory_id or "unknown"
+        traj_dir = os.path.join(dump_dir, traj_id)
+        try:
+            os.makedirs(traj_dir, exist_ok=True)
+        except OSError:
+            return
+
+        if ctx.parent_rid is None:
+            filename = "parent.txt"
+        else:
+            filename = f"child_{ctx.child_index}.txt"
+        filepath = os.path.join(traj_dir, filename)
+
+        lines: List[str] = []
+        role = "parent" if ctx.parent_rid is None else f"child_{ctx.child_index}"
+        lines.append(f"trajectory_id={traj_id}  role={role}  depth={ctx.depth}  steps={len(output.step_outputs)}\n")
+
+        last_metrics = output.step_outputs[-1].env_metrics if output.step_outputs else {}
+        final_answer = last_metrics.get("final_answer")
+        submitted = last_metrics.get("final_value_set", False)
+        lines.append(f"submitted={submitted}  final_answer={final_answer!r}\n")
+        if "judge_precision" in last_metrics:
+            lines.append(
+                f"judge_precision={last_metrics['judge_precision']:.3f}"
+                f"  judge_recall={last_metrics['judge_recall']:.3f}\n"
+            )
+        lines.append("\n")
+
+        if output.step_outputs:
+            prompt_text = self.tokenizer.decode(output.step_outputs[0].prompt_ids, skip_special_tokens=False)
+            lines.append("=== PROMPT ===\n")
+            lines.append(prompt_text)
+            lines.append("\n\n")
+
+            for i, step in enumerate(output.step_outputs):
+                resp_text = self.tokenizer.decode(step.response_ids, skip_special_tokens=False)
+                lines.append(f"=== TURN {i} ===\n")
+                lines.append(resp_text)
+                lines.append("\n\n")
+
+        try:
+            with open(filepath, "w") as f:
+                f.write("".join(lines))
+            logger.info(f"Dumped rollout → {filepath}")
+        except OSError as e:
+            logger.warning(f"Failed to dump rollout {filepath}: {e}")

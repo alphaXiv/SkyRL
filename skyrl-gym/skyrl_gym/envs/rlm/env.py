@@ -84,10 +84,9 @@ _FINAL_RE = re.compile(r"^\s*FINAL\((.*)\)\s*$", re.MULTILINE | re.DOTALL)
 
 
 def _find_code_block(text: str) -> Optional[str]:
-    """Return the LAST ```repl ... ``` code block in the response, or None.
-    """
+    """Return the FIRST ```repl ... ``` code block in the response, or None."""
     matches = _REPL_BLOCK_RE.findall(text)
-    return matches[-1].strip() if matches else None
+    return matches[0].strip() if matches else None
 
 
 def _find_final_answer(text: str, repl: Optional[PersistentREPL]) -> Optional[str]:

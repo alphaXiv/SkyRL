@@ -21,3 +21,6 @@ class RLMGeneratorConfig(GeneratorConfig):
     frozen_openrouter_model: Optional[str] = None
     """When set, in-REPL ``llm_query`` calls use this frozen model via OpenRouter
     instead of the policy engine."""
+    rollout_dump_dir: Optional[str] = None
+    """When set, decoded parent and child rollouts are written to this directory
+    as they complete (one file per rollout, grouped by trajectory_id)."""
