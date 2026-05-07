@@ -253,6 +253,7 @@ def dump_per_dataset_eval_results(
     # Prepare common data
     input_prompts = [tokenizer.decode(prompt) for prompt in concat_generator_outputs["prompt_token_ids"]]
     output_responses = [tokenizer.decode(response) for response in concat_generator_outputs["response_ids"]]
+    env_metrics_list = concat_generator_outputs.get("env_metrics", None)
 
     # Group indices by data source
     data_source_indices = {}
@@ -264,21 +265,36 @@ def dump_per_dataset_eval_results(
         data_source_indices[data_source].append(i)
 
     # Dump per-dataset files
+    is_last = concat_generator_outputs.get("is_last_step")
     for data_source, indices in data_source_indices.items():
         sanitized_data_source = sanitize_data_source(data_source)
         filename = dump_dir_path / f"{sanitized_data_source}.jsonl"
 
         with open(filename, "w") as f:
             for i in indices:
+                em_i = env_metrics_list[i] if env_metrics_list is not None and i < len(env_metrics_list) else None
+                # Skip mid-trajectory steps. Two signals identify a row worth
+                # dumping: the base generator's `is_last_step` (true only at
+                # the absolute last index of each agent_loop call), and the
+                # per-trajectory `is_trajectory_boundary` flag stamped by
+                # generators that inline child trajectories (e.g. RLM). The
+                # latter recovers child rollouts that lose `is_last_step` when
+                # their step_outputs get prepended into the root's.
+                if is_last is not None and not is_last[i]:
+                    if not (em_i and em_i.get("is_trajectory_boundary")):
+                        continue
+                env_extras_clean = {k: v for k, v in concat_env_extras[i].items() if k != "extra_info"}
                 entry = {
                     "input_prompt": input_prompts[i],
                     "output_response": output_responses[i],
-                    "score": concat_generator_outputs["rewards"][i],
+                    # "score": concat_generator_outputs["rewards"][i],
                     "stop_reason": concat_generator_outputs.get("stop_reasons", [None] * len(input_prompts))[i],
                     "env_class": concat_all_envs[i],
-                    "env_extras": concat_env_extras[i],
+                    "env_extras": env_extras_clean,
                     "data_source": data_source,
                 }
+                if em_i is not None:
+                    entry["env_metrics"] = em_i
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
         logger.info(f"Dumped eval data for {data_source} to {filename}")
