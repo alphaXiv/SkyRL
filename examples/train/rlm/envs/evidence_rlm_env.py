@@ -10,6 +10,7 @@ The subclass overrides ``_get_reward`` with an LLM-judge scorer.
 
 from __future__ import annotations
 
+import json
 import textwrap
 from typing import Any, Dict, List
 
@@ -226,6 +227,23 @@ FINAL_VAR([p1, p2])
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _extract_paper_texts(extras: Dict[str, Any]) -> Dict[str, str]:
+    """Extract the {paperId: text} dict from extra_info.context_text, or empty dict."""
+    raw = (extras.get("extra_info") or {}).get("context_text")
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {}
+
+
+# ---------------------------------------------------------------------------
 # Environment
 # ---------------------------------------------------------------------------
 
@@ -245,12 +263,14 @@ class EvidenceRLMEnv(BaseRLMEnv):
 
     def _get_reward(self, final_answer: str) -> float:
         evidence = (self.extras.get("reward_spec") or {}).get("evidence") or []
+        paper_texts = _extract_paper_texts(self.extras)
         reward, precision, recall = judge_reward(
             final_answer,
             question=self._root_prompt,
             evidence=evidence,
             model=self.JUDGE_MODEL,
             base_url=self.JUDGE_BASE_URL,
+            paper_texts=paper_texts,
         )
         self._judge_precision = precision
         self._judge_recall = recall
@@ -287,12 +307,14 @@ class MultipaperEvidenceRLMEnv(EvidenceRLMEnv):
         if depth > 0: return 0.0 # short circuit child rewards to 0
 
         evidence = (self.extras.get("reward_spec") or {}).get("evidence") or []
+        paper_texts = _extract_paper_texts(self.extras)
         reward, precision, recall = judge_reward(
             final_answer,
             question=self._root_prompt,
             evidence=evidence,
             model=self.JUDGE_MODEL,
             base_url=self.JUDGE_BASE_URL,
+            paper_texts=paper_texts,
         )
         self._judge_precision = precision
         self._judge_recall = recall

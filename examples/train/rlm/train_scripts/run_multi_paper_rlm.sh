@@ -31,6 +31,7 @@ fi
 : "${TRAIN_GPUS:=8}"
 : "${LOGGER:=wandb}"
 : "${INFERENCE_BACKEND:=vllm}"
+: "${RESUME_PATH:=/home/ssh/weights/global_step_129}"
 export RAY_CGRAPH_get_timeout="${RAY_CGRAPH_get_timeout:-900}"
 
 uv run --extra fsdp --python 3.12 -m examples.train.rlm.main_rlm \
@@ -44,6 +45,8 @@ uv run --extra fsdp --python 3.12 -m examples.train.rlm.main_rlm \
   generator.batched=false \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.policy.model.path="alphaXiv/evidence-multi-rlm-sft-4b" \
+  trainer.resume_mode="from_path" \
+  trainer.resume_path="$RESUME_PATH" \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
   trainer.placement.policy_num_gpus_per_node=$TRAIN_GPUS \

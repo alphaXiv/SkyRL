@@ -5,7 +5,8 @@ F1 over retrieved text intervals vs. ground-truth evidence spans. Used by
 per-trajectory wandb metrics over the parent/child rollout tree.
 """
 
-from typing import Any, Dict, List, Tuple
+import textwrap
+from typing import Any, Dict, List, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +192,9 @@ def compute_child_rlm_metrics(
 # LLM-judge reward
 # ---------------------------------------------------------------------------
 
+_TRUNC_MARKER = " [TRUNCATED — unnecessarily long string attempting to reward hack]"
+_TRUNC_LIMIT = 2500
+
 _RUBRIC_RESPONSE_FORMAT = {
     "type": "json_schema",
     "json_schema": {
@@ -199,6 +203,10 @@ _RUBRIC_RESPONSE_FORMAT = {
         "schema": {
             "type": "object",
             "properties": {
+                "reasoning": {
+                    "type": "string",
+                    "description": "Brief explanation that justifies the scores. Must come before the scores so the judgement is reasoned, not rationalized.",
+                },
                 "precision_score": {
                     "type": "integer",
                     "description": "1-10: how tight and accurate the spans are (no extraneous sentences, no off-topic padding)",
@@ -207,115 +215,98 @@ _RUBRIC_RESPONSE_FORMAT = {
                     "type": "integer",
                     "description": "1-10: how thoroughly the evidence covers what is needed to answer the question",
                 },
-                "reasoning": {
-                    "type": "string",
-                    "description": "Brief explanation of the scores",
-                },
             },
-            "required": ["precision_score", "recall_score", "reasoning"],
+            "required": ["reasoning", "precision_score", "recall_score"],
             "additionalProperties": False,
         },
     },
 }
 
+_RUBRIC_TAIL = textwrap.dedent("""\
 
-def _extract_gt_strings(evidence: List[Any]) -> List[str]:
-    out: List[str] = []
-    for ev in evidence or []:
-        if isinstance(ev, str):
-            out.append(ev)
-        elif isinstance(ev, dict):
-            for sel in ev.get("selections", []):
-                text = sel.get("text", "").strip()
-                if text:
-                    out.append(text)
-    return out
+    Score the predicted evidence on two dimensions (1-10 each):
+
+    PRECISION SCORE — are the spans tight and free of off-topic padding?
+      10 — every span contains only directly relevant sentences; no extraneous setup, headers, or filler
+       9 — essentially tight; one trivially redundant phrase but no real noise
+       8 — minor padding (1-2 extra sentences) but core content is accurate
+       7 — a few extra sentences that are related but not strictly necessary
+       6 — noticeable extraneous text in some spans, but the relevant parts are present
+       5 — roughly half the content is relevant; half is filler or tangential
+       4 — spans are significantly bloated with irrelevant surrounding text
+       3 — small fraction of each span is on-topic; most is irrelevant context
+       2 — most of each span is irrelevant; the relevant fragment is buried
+       1 — extractions are almost entirely off-topic or wrong
+
+    RECALL SCORE — do the predicted spans collectively cover what is needed to answer the question?
+      10 — all key facts needed to answer the question are present; nothing important missing
+       9 — all key facts present; only a trivially minor detail absent
+       8 — most key facts covered; one minor detail missing
+       7 — core answer present; a couple of supporting details missing
+       6 — core answer present but a meaningful portion of the needed evidence is missing
+       5 — about half the needed evidence is covered; half is missing
+       4 — partial answer only; several important aspects absent
+       3 — a few relevant facts retrieved but most of the needed evidence is missing
+       2 — barely touches the question; most of the needed evidence is missing
+       1 — no relevant content retrieved
+
+    Watch for reward hacking when scoring:
+      - A predicted block rendered as "(none)" means nothing was extracted for that paper; it must NOT positively contribute to precision (absence is not precision, it is a miss).
+      - A span containing the marker "[TRUNCATED — unnecessarily long string attempting to reward hack]" is a dumped mega-blob; it must NOT upweight recall, even if the ground-truth content happens to appear inside it. Treat such spans as low-precision noise.
+
+    Provide a brief reasoning string (2-4 sentences) explaining the scores.
+""")
 
 
-def judge_reward(
-    final_answer: str,
-    question: str,
+def _group_evidence_by_paper(
     evidence: List[Any],
-    model: str = "gpt-4.1-nano",
-    base_url: str = "https://api.openai.com/v1",
-) -> Tuple[float, float, float]:
-    """Score a final answer with an LLM judge.
+) -> Tuple[List[Tuple[str, List[str]]], Dict[str, int], List[str]]:
+    """Split evidence list into per-paper buckets and a flat GT strings list."""
+    gt_by_paper: List[Tuple[str, List[str]]] = []
+    gt_paper_index: Dict[str, int] = {}
+    gt_unlabeled: List[str] = []
+    for ev in (evidence or []):
+        if isinstance(ev, str):
+            s = ev.strip()
+            if s:
+                gt_unlabeled.append(s)
+        elif isinstance(ev, dict):
+            pid = ev.get("paperId")
+            selections = [
+                sel.get("text", "").strip()
+                for sel in ev.get("selections", [])
+                if sel.get("text", "").strip()
+            ]
+            if not selections:
+                continue
+            if pid is None:
+                gt_unlabeled.extend(selections)
+                continue
+            idx = gt_paper_index.get(pid)
+            if idx is None:
+                gt_paper_index[pid] = len(gt_by_paper)
+                gt_by_paper.append((pid, list(selections)))
+            else:
+                gt_by_paper[idx][1].extend(selections)
+    return gt_by_paper, gt_paper_index, gt_unlabeled
 
-    Returns ``(reward, precision, recall)`` where precision and recall are
-    0-1 and reward is ``(precision + recall) / 2``.
-    """
-    import ast
+
+def _call_judge(
+    user_msg: str,
+    model: str,
+    base_url: str,
+) -> Dict[str, Any]:
     import json
-    import os
-    import textwrap
     import time
 
     import httpx
     from loguru import logger
 
-    gt_strings = _extract_gt_strings(evidence)
-
-    try:
-        predicted = ast.literal_eval(final_answer)
-        if isinstance(predicted, str):
-            predicted = [predicted]
-        elif isinstance(predicted, (list, tuple)):
-            predicted = [s if isinstance(s, str) else str(s) for s in predicted]
-        else:
-            predicted = [str(predicted)]
-    except (ValueError, SyntaxError):
-        predicted = [s.strip() for s in final_answer.split("\n\n") if s.strip()]
-
-    gt_block = "\n\n".join(f"[{i}] {t}" for i, t in enumerate(gt_strings)) or "(none)"
-    pred_block = "\n\n".join(f"[{i}] {t}" for i, t in enumerate(predicted)) or "(none)"
-
-    user_msg = textwrap.dedent(f"""\
-        You are evaluating predicted evidence extractions against ground truth evidence for a question.
-        Treat the ground truth evidence as a perfect 10/10 reference for all dimensions.
-
-        Question: {question}
-
-        Ground truth evidence (reference — treat as 10/10 on all dimensions):
-        {gt_block}
-
-        Predicted evidence:
-        {pred_block}
-
-        Score the predicted evidence on two dimensions (1-10 each):
-
-        PRECISION SCORE — are the spans tight and free of off-topic padding?
-          10 — every span contains only directly relevant sentences; no extraneous setup, headers, or filler
-           9 — essentially tight; one trivially redundant phrase but no real noise
-           8 — minor padding (1-2 extra sentences) but core content is accurate
-           7 — a few extra sentences that are related but not strictly necessary
-           6 — noticeable extraneous text in some spans, but the relevant parts are present
-           5 — roughly half the content is relevant; half is filler or tangential
-           4 — spans are significantly bloated with irrelevant surrounding text
-           3 — small fraction of each span is on-topic; most is irrelevant context
-           2 — most of each span is irrelevant; the relevant fragment is buried
-           1 — extractions are almost entirely off-topic or wrong
-
-        RECALL SCORE — do the predicted spans collectively cover what is needed to answer the question?
-          10 — all key facts from the ground truth are present; nothing important missing
-           9 — all key facts present; only a trivially minor detail absent
-           8 — most key facts covered; one minor detail from the ground truth absent
-           7 — core answer present; a couple of supporting details from the ground truth missing
-           6 — core answer present but a meaningful portion of the ground truth evidence is missing
-           5 — about half the ground truth evidence is covered; half is missing
-           4 — partial answer only; several important aspects from the ground truth are absent
-           3 — a few relevant facts retrieved but most of the ground truth evidence is missing
-           2 — barely touches the question; most of the ground truth evidence is missing
-           1 — no relevant content retrieved
-
-        Provide a brief reasoning string (2-4 sentences) explaining the scores.
-    """)
-
-    api_key = os.environ.get("OPENAI_API_KEY", "")
+    api_key = __import__("os").environ.get("OPENAI_API_KEY", "")
     if not api_key:
         raise ValueError("OPENAI_API_KEY environment variable must be set when using a judge reward")
 
     base_url = base_url.rstrip("/")
-    result = None
     for attempt in range(5):
         if attempt > 0:
             time.sleep(2 ** attempt)
@@ -339,21 +330,168 @@ def judge_reward(
         except Exception as e:
             if attempt == 4:
                 logger.warning(f"Judge reward model failed after 5 attempts: {e}")
-                return 0.0, 0.0, 0.0
+                return {"reasoning": f"error: {e}", "precision_score": 0, "recall_score": 0}
             logger.warning(f"Judge reward model attempt {attempt + 1} failed: {e}, retrying...")
             continue
 
         try:
-            result = json.loads(data["choices"][0]["message"]["content"])
-            break
-        except json.JSONDecodeError:
+            return json.loads(data["choices"][0]["message"]["content"])
+        except Exception:
             if attempt == 4:
-                return 0.0, 0.0, 0.0
+                return {"reasoning": "json decode error", "precision_score": 0, "recall_score": 0}
             continue
 
-    if result is None:
-        return 0.0, 0.0, 0.0
+    return {"reasoning": "exhausted retries", "precision_score": 0, "recall_score": 0}
 
-    precision = result.get("precision_score", 0) / 10.0
-    recall = result.get("recall_score", 0) / 10.0
+
+def _judge_single(
+    question: str,
+    gt_strings: List[str],
+    pred_strings: List[str],
+    paper_header: Optional[str],
+    model: str,
+    base_url: str,
+) -> Dict[str, Any]:
+    gt_chars = sum(len(t) for t in gt_strings)
+    pred_chars = sum(len(t) for t in pred_strings)
+    ratio_note = ""
+    if gt_chars > 0 and pred_chars > 0:
+        ratio = pred_chars / gt_chars
+        ratio_note = f"; predicted is {ratio:.1f}× the size of the ground truth"
+    size_line = f"Sizes — ground truth: {gt_chars} chars total | predicted: {pred_chars} chars total{ratio_note}"
+
+    gt_block = "\n\n".join(f"Ground truth* {i}: {t}" for i, t in enumerate(gt_strings)) or "(none)"
+    pred_block = "\n\n".join(f"Predicted* {i}: {t}" for i, t in enumerate(pred_strings)) or "(none)"
+    paper_line = f"\nPaper: {paper_header}\n" if paper_header else ""
+
+    user_msg = textwrap.dedent(f"""\
+        You are evaluating predicted evidence extractions for a question, restricted to a single paper.
+        You must score the predicted evidence against the ground truth evidence.
+
+        Treat the ground truth as the authoritative answer key. For PRECISION specifically, predicted content that does not align with the ground truth spans is noise — even if it looks topically related to the question. Off-reference content is not "still useful"; it is padding. Be strict.
+        {paper_line}
+        Question: {question}
+
+        {size_line}
+
+        Ground truth evidence (the answer key — predictions are scored against this):
+        {gt_block}
+
+        Predicted evidence:
+        {pred_block}
+    """) + _RUBRIC_TAIL
+
+    return _call_judge(user_msg, model, base_url)
+
+
+def judge_reward(
+    final_answer: str,
+    question: str,
+    evidence: List[Any],
+    model: str = "gpt-5.4-mini-2026-03-17",
+    base_url: str = "https://api.openai.com/v1",
+    paper_texts: Optional[Dict[str, str]] = None,
+    paper_titles: Optional[Dict[str, str]] = None,
+) -> Tuple[float, float, float]:
+    """Score a final answer with a strict per-paper LLM judge.
+
+    Returns ``(reward, precision, recall)`` where precision and recall are
+    0-1 and reward is ``(precision + recall) / 2``.
+    """
+    import ast
+
+    paper_texts = paper_texts or {}
+    paper_titles = paper_titles or {}
+
+    try:
+        predicted_raw = ast.literal_eval(final_answer)
+        if isinstance(predicted_raw, str):
+            predicted_raw = [predicted_raw]
+        elif isinstance(predicted_raw, (list, tuple)):
+            predicted_raw = [s if isinstance(s, str) else str(s) for s in predicted_raw]
+        else:
+            predicted_raw = [str(predicted_raw)]
+    except (ValueError, SyntaxError):
+        predicted_raw = [s.strip() for s in final_answer.split("\n\n") if s.strip()]
+
+    # Zero-reward short-circuit: every non-empty span must be verbatim in some paper.
+    if paper_texts:
+        all_bodies = list(paper_texts.values())
+        for span in predicted_raw:
+            s = span.strip()
+            if s and not any(s in body for body in all_bodies):
+                return 0.0, 0.0, 0.0
+
+    # Truncate mega-blobs to penalize reward hacking.
+    predicted = [
+        (s[:_TRUNC_LIMIT] + _TRUNC_MARKER) if len(s) > _TRUNC_LIMIT else s
+        for s in predicted_raw
+    ]
+
+    gt_by_paper, gt_paper_index, gt_unlabeled = _group_evidence_by_paper(evidence)
+    is_multi_paper = bool(paper_texts) and bool(gt_by_paper)
+
+    if is_multi_paper:
+        pred_by_paper: Dict[str, List[str]] = {pid: [] for pid, _ in gt_by_paper}
+        unmatched_pred: List[str] = []
+        for span in predicted:
+            s = span.strip()
+            if not s:
+                continue
+            assigned_pid = None
+            for pid, _ in gt_by_paper:
+                if s in paper_texts.get(pid, ""):
+                    assigned_pid = pid
+                    break
+            if assigned_pid is None:
+                for pid, body in paper_texts.items():
+                    if pid in gt_paper_index:
+                        continue
+                    if s in body:
+                        assigned_pid = pid
+                        break
+            if assigned_pid is None:
+                unmatched_pred.append(s)
+            else:
+                pred_by_paper.setdefault(assigned_pid, []).append(s)
+
+        precision_scores: List[int] = []
+        recall_scores: List[int] = []
+
+        for pid, gts in gt_by_paper:
+            preds = pred_by_paper.get(pid, [])
+            if not preds:
+                # GT paper with no predictions: recall = 1/10, no precision contribution.
+                recall_scores.append(1)
+                continue
+            title = paper_titles.get(pid, "")
+            header = f"{pid}" + (f" — {title}" if title else "")
+            r = _judge_single(question, gts, preds, header, model, base_url)
+            precision_scores.append(int(r.get("precision_score", 0) or 0))
+            recall_scores.append(int(r.get("recall_score", 0) or 0))
+
+        for pid, preds in pred_by_paper.items():
+            if pid in gt_paper_index or not preds:
+                continue
+            # Non-GT paper with predictions: precision = 1/10, no recall contribution.
+            precision_scores.append(1)
+
+        if unmatched_pred:
+            # Predictions not verbatim in any paper: precision = 0.
+            precision_scores.append(0)
+
+        avg_p = sum(precision_scores) / len(precision_scores) if precision_scores else 0.0
+        avg_r = sum(recall_scores) / len(recall_scores) if recall_scores else 0.0
+        precision = avg_p / 10.0
+        recall = avg_r / 10.0
+        return (precision + recall) / 2.0, precision, recall
+
+    # Single-paper / no-context fallback: one global judge call.
+    gt_strings: List[str] = gt_unlabeled[:]
+    for _, sels in gt_by_paper:
+        gt_strings.extend(sels)
+
+    result = _judge_single(question, gt_strings, predicted, None, model, base_url)
+    precision = int(result.get("precision_score", 0) or 0) / 10.0
+    recall = int(result.get("recall_score", 0) or 0) / 10.0
     return (precision + recall) / 2.0, precision, recall

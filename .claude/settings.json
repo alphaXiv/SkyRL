@@ -21,7 +21,8 @@
       "Bash(rm /venv/testwrite)",
       "Bash(ls /tmp/ray/ 2>/dev/null | tail -5)",
       "Read(//tmp/ray/**)",
-      "Bash(uv run --python 3.12 python3 -c ' *)"
+      "Bash(uv run --python 3.12 python3 -c ' *)",
+      "Bash(python3 -)"
     ]
   }
 }
