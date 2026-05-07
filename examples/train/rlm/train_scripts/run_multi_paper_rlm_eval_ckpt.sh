@@ -30,7 +30,7 @@ fi
 : "${TP_SIZE:=4}"
 : "${TRAIN_GPUS:=8}"
 : "${INFERENCE_BACKEND:=vllm}"
-: "${RESUME_PATH:=/root/weights/global_step_130}"
+: "${RESUME_PATH:=/home/ssh/weights/global_step_129}"
 export RAY_CGRAPH_get_timeout="${RAY_CGRAPH_get_timeout:-900}"
 
 uv run --extra fsdp --python 3.12 -m examples.train.rlm.main_rlm \
@@ -73,7 +73,7 @@ uv run --extra fsdp --python 3.12 -m examples.train.rlm.main_rlm \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
   generator.inference_engine.async_engine=true \
-  generator.inference_engine.gpu_memory_utilization=0.6 \
+  generator.inference_engine.gpu_memory_utilization=0.8 \
   generator.inference_engine.engine_init_kwargs.language_model_only=true \
   generator.inference_engine.enforce_eager=false \
   generator.chat_template_kwargs.enable_thinking=false \
