@@ -30,7 +30,7 @@ fi
 : "${TP_SIZE:=4}"
 : "${TRAIN_GPUS:=8}"
 : "${INFERENCE_BACKEND:=vllm}"
-: "${RESUME_PATH:=/neer/artifacts/019d4d53-7c91-7052-b90b-5dedbeaf6580/019df632-1a39-76be-9674-287ef7c776e3/ckpts/rlm_ckpt/global_step_130}"
+: "${RESUME_PATH:=/root/weights/global_step_130}"
 export RAY_CGRAPH_get_timeout="${RAY_CGRAPH_get_timeout:-900}"
 
 uv run --extra fsdp --python 3.12 -m examples.train.rlm.main_rlm \
