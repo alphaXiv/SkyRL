@@ -31,7 +31,7 @@ fi
 : "${TRAIN_GPUS:=8}"
 : "${LOGGER:=wandb}"
 : "${INFERENCE_BACKEND:=vllm}"
-: "${RESUME_PATH:=/home/ssh/weights/global_step_129}"
+: "${RESUME_PATH:=/home/ssh/weights/curriculum-strict-judge/global_step_200}"
 export RAY_CGRAPH_get_timeout="${RAY_CGRAPH_get_timeout:-900}"
 
 uv run --extra fsdp --python 3.12 -m examples.train.rlm.main_rlm \
@@ -55,7 +55,7 @@ uv run --extra fsdp --python 3.12 -m examples.train.rlm.main_rlm \
   generator.inference_engine.tensor_parallel_size=$TP_SIZE \
   trainer.policy.fsdp_config.wrap_policy.transformer_layer_cls_to_wrap="['Qwen3_5DecoderLayer']" \
   trainer.ref.fsdp_config.wrap_policy.transformer_layer_cls_to_wrap="['Qwen3_5DecoderLayer']" \
-  trainer.epochs=1 \
+  trainer.epochs=5 \
   trainer.eval_before_train=true \
   trainer.eval_interval=10 \
   trainer.update_epochs_per_batch=1 \

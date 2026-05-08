@@ -410,6 +410,19 @@ class RLMGymGenerator(SkyRLGymGenerator):
                 f"judge_precision={last_metrics['judge_precision']:.3f}"
                 f"  judge_recall={last_metrics['judge_recall']:.3f}\n"
             )
+        if ctx.parent_rid is None:
+            if "query" in last_metrics:
+                lines.append(f"query={last_metrics['query']!r}\n")
+            if "context_paper_ids" in last_metrics:
+                lines.append(f"context_paper_ids={last_metrics['context_paper_ids']!r}\n")
+            if "ground_truth_paper_ids" in last_metrics:
+                lines.append(f"ground_truth_paper_ids={last_metrics['ground_truth_paper_ids']!r}\n")
+            if "predicted_paper_ids" in last_metrics:
+                lines.append(f"predicted_paper_ids={last_metrics['predicted_paper_ids']!r}\n")
+            if "ground_truth_evidence" in last_metrics:
+                lines.append(f"ground_truth_evidence={last_metrics['ground_truth_evidence']!r}\n")
+            if "judge_per_paper" in last_metrics:
+                lines.append(f"judge_per_paper={last_metrics['judge_per_paper']!r}\n")
         lines.append("\n")
 
         if output.step_outputs:

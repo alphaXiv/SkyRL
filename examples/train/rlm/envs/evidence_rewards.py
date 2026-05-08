@@ -392,11 +392,13 @@ def judge_reward(
     base_url: str = "https://api.openai.com/v1",
     paper_texts: Optional[Dict[str, str]] = None,
     paper_titles: Optional[Dict[str, str]] = None,
-) -> Tuple[float, float, float]:
+) -> Tuple[float, float, float, Dict[str, Any]]:
     """Score a final answer with a strict per-paper LLM judge.
 
-    Returns ``(reward, precision, recall)`` where precision and recall are
-    0-1 and reward is ``(precision + recall) / 2``.
+    Returns ``(reward, precision, recall, extras)`` where precision and recall
+    are 0-1, reward is ``(precision + recall) / 2``, and extras contains:
+    - ``per_paper``: ``{paper_id: {"precision": float, "recall": float}}``
+    - ``predicted_paper_ids``: list of paper IDs that had predictions assigned
     """
     import ast
 
@@ -420,7 +422,7 @@ def judge_reward(
         for span in predicted_raw:
             s = span.strip()
             if s and not any(s in body for body in all_bodies):
-                return 0.0, 0.0, 0.0
+                return 0.0, 0.0, 0.0, {"per_paper": {}, "predicted_paper_ids": []}
 
     # Truncate mega-blobs to penalize reward hacking.
     predicted = [
@@ -455,36 +457,58 @@ def judge_reward(
             else:
                 pred_by_paper.setdefault(assigned_pid, []).append(s)
 
+        # Paper-ID F1 gate: if the model didn't select the right papers, skip judging.
+        gt_pid_set = {pid for pid, _ in gt_by_paper}
+        pred_pid_set = {pid for pid, preds in pred_by_paper.items() if preds}
+        if gt_pid_set or pred_pid_set:
+            pid_inter = gt_pid_set & pred_pid_set
+            pid_p = len(pid_inter) / len(pred_pid_set) if pred_pid_set else 0.0
+            pid_r = len(pid_inter) / len(gt_pid_set) if gt_pid_set else 0.0
+            pid_f1 = 2 * pid_p * pid_r / (pid_p + pid_r) if (pid_p + pid_r) > 0 else 0.0
+        else:
+            pid_f1 = 0.0
+        if pid_f1 < 0.6:
+            return 0.0, 0.0, 0.0, {"per_paper": {}, "predicted_paper_ids": []}
+
         precision_scores: List[int] = []
         recall_scores: List[int] = []
+        per_paper: Dict[str, Dict[str, float]] = {}
 
         for pid, gts in gt_by_paper:
             preds = pred_by_paper.get(pid, [])
             if not preds:
                 # GT paper with no predictions: recall = 1/10, no precision contribution.
                 recall_scores.append(1)
+                per_paper[pid] = {"precision": None, "recall": 0.1}
                 continue
             title = paper_titles.get(pid, "")
             header = f"{pid}" + (f" — {title}" if title else "")
             r = _judge_single(question, gts, preds, header, model, base_url)
-            precision_scores.append(int(r.get("precision_score", 0) or 0))
-            recall_scores.append(int(r.get("recall_score", 0) or 0))
+            p_score = int(r.get("precision_score", 0) or 0)
+            r_score = int(r.get("recall_score", 0) or 0)
+            precision_scores.append(p_score)
+            recall_scores.append(r_score)
+            per_paper[pid] = {"precision": p_score / 10.0, "recall": r_score / 10.0}
 
         for pid, preds in pred_by_paper.items():
             if pid in gt_paper_index or not preds:
                 continue
             # Non-GT paper with predictions: precision = 1/10, no recall contribution.
             precision_scores.append(1)
+            per_paper[pid] = {"precision": 0.1, "recall": None}
 
         if unmatched_pred:
             # Predictions not verbatim in any paper: precision = 0.
             precision_scores.append(0)
 
+        predicted_paper_ids = [pid for pid, preds in pred_by_paper.items() if preds]
+
         avg_p = sum(precision_scores) / len(precision_scores) if precision_scores else 0.0
         avg_r = sum(recall_scores) / len(recall_scores) if recall_scores else 0.0
         precision = avg_p / 10.0
         recall = avg_r / 10.0
-        return (precision + recall) / 2.0, precision, recall
+        extras = {"per_paper": per_paper, "predicted_paper_ids": predicted_paper_ids}
+        return (precision + recall) / 2.0, precision, recall, extras
 
     # Single-paper / no-context fallback: one global judge call.
     gt_strings: List[str] = gt_unlabeled[:]
@@ -494,4 +518,4 @@ def judge_reward(
     result = _judge_single(question, gt_strings, predicted, None, model, base_url)
     precision = int(result.get("precision_score", 0) or 0) / 10.0
     recall = int(result.get("recall_score", 0) or 0) / 10.0
-    return (precision + recall) / 2.0, precision, recall
+    return (precision + recall) / 2.0, precision, recall, {"per_paper": {}, "predicted_paper_ids": []}

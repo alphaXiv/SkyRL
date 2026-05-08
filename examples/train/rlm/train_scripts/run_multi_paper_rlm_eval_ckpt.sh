@@ -30,7 +30,7 @@ fi
 : "${TP_SIZE:=4}"
 : "${TRAIN_GPUS:=8}"
 : "${INFERENCE_BACKEND:=vllm}"
-: "${RESUME_PATH:=/home/ssh/weights/global_step_129}"
+: "${RESUME_PATH:=/home/ssh/weights/curriculum-strict-judge/global_step_200}"
 export RAY_CGRAPH_get_timeout="${RAY_CGRAPH_get_timeout:-900}"
 
 uv run --extra fsdp --python 3.12 -m examples.train.rlm.main_rlm \

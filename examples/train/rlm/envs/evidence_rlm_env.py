@@ -264,7 +264,7 @@ class EvidenceRLMEnv(BaseRLMEnv):
     def _get_reward(self, final_answer: str) -> float:
         evidence = (self.extras.get("reward_spec") or {}).get("evidence") or []
         paper_texts = _extract_paper_texts(self.extras)
-        reward, precision, recall = judge_reward(
+        reward, precision, recall, extras = judge_reward(
             final_answer,
             question=self._root_prompt,
             evidence=evidence,
@@ -274,6 +274,8 @@ class EvidenceRLMEnv(BaseRLMEnv):
         )
         self._judge_precision = precision
         self._judge_recall = recall
+        self._judge_per_paper = extras.get("per_paper", {})
+        self._predicted_paper_ids = extras.get("predicted_paper_ids", [])
         return reward
 
     def get_metrics(self) -> Dict[str, Any]:
@@ -308,7 +310,7 @@ class MultipaperEvidenceRLMEnv(EvidenceRLMEnv):
 
         evidence = (self.extras.get("reward_spec") or {}).get("evidence") or []
         paper_texts = _extract_paper_texts(self.extras)
-        reward, precision, recall = judge_reward(
+        reward, precision, recall, extras = judge_reward(
             final_answer,
             question=self._root_prompt,
             evidence=evidence,
@@ -318,11 +320,28 @@ class MultipaperEvidenceRLMEnv(EvidenceRLMEnv):
         )
         self._judge_precision = precision
         self._judge_recall = recall
+        self._judge_per_paper = extras.get("per_paper", {})
+        self._predicted_paper_ids = extras.get("predicted_paper_ids", [])
         return reward
 
     def _get_system_prompt(self) -> str:
         depth = self.extras.get("depth", 0)
         return MULTIPAPER_PARENT_SYSTEM_PROMPT if depth == 0 else MULTIPAPER_CHILD_SYSTEM_PROMPT
+
+    def get_metrics(self) -> Dict[str, Any]:
+        metrics = super().get_metrics()
+        depth = self.extras.get("depth", 0)
+        if depth == 0:
+            metrics["query"] = self._root_prompt
+            evidence = (self.extras.get("reward_spec") or {}).get("evidence") or []
+            metrics["ground_truth_paper_ids"] = [e["paperId"] for e in evidence if "paperId" in e]
+            metrics["ground_truth_evidence"] = evidence
+            metrics["context_paper_ids"] = list(_extract_paper_texts(self.extras).keys())
+            if hasattr(self, "_predicted_paper_ids"):
+                metrics["predicted_paper_ids"] = self._predicted_paper_ids
+            if hasattr(self, "_judge_per_paper"):
+                metrics["judge_per_paper"] = self._judge_per_paper
+        return metrics
 
     @staticmethod
     def aggregate_metrics(metrics: List[Dict[str, Any]]) -> Dict[str, Any]:
