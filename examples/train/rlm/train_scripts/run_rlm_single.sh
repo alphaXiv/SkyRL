@@ -13,6 +13,12 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 export UV_CACHE_DIR UV_PROJECT_ENVIRONMENT
 
 : "${DATA_DIR:=$HOME/data/rlm-synthetic}"
+
+if [ ! -f "$DATA_DIR/train.parquet" ] || [ ! -f "$DATA_DIR/validation.parquet" ]; then
+  echo "Data files missing — generating from alphaXiv/single-paper-synthetic on HuggingFace..."
+  uv run --python 3.12 -- python examples/train/rlm/datasets/rlm_dataset_synthetic_single.py --output_dir "$DATA_DIR"
+fi
+
 : "${NUM_ENGINES:=2}"
 : "${TP_SIZE:=4}"
 : "${TRAIN_GPUS:=8}"
@@ -38,6 +44,7 @@ uv run --extra fsdp -m examples.train.rlm.main_rlm \
   generator.inference_engine.tensor_parallel_size=$TP_SIZE \
   trainer.policy.fsdp_config.wrap_policy.transformer_layer_cls_to_wrap="['Qwen3_5DecoderLayer']" \
   trainer.ref.fsdp_config.wrap_policy.transformer_layer_cls_to_wrap="['Qwen3_5DecoderLayer']" \
+  trainer.resume_mode=none \
   trainer.epochs=5 \
   trainer.eval_before_train=true \
   trainer.eval_interval=10 \

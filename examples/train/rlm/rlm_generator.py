@@ -202,6 +202,9 @@ class RLMGymGenerator(SkyRLGymGenerator):
                 )
                 children_flat.extend(d.output.step_outputs)
             if children_flat:
+                n_children = len(descendants)
+                for step in children_flat:
+                    step.env_metrics["_advantage_scale"] = 1.0 / n_children
                 agent_loop_output.step_outputs = children_flat + agent_loop_output.step_outputs
 
         for r in [rid, *(d.rid for d in descendants)]:

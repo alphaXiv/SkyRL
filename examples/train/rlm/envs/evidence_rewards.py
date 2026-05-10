@@ -239,7 +239,7 @@ _RUBRIC_TAIL = textwrap.dedent("""\
        1 — extractions are almost entirely off-topic or wrong
 
     RECALL SCORE — do the predicted spans collectively cover what is needed to answer the question?
-      10 — all key facts needed to answer the question are present; nothing important missing
+    {recall_hint}  10 — all key facts needed to answer the question are present; nothing important missing
        9 — all key facts present; only a trivially minor detail absent
        8 — most key facts covered; one minor detail missing
        7 — core answer present; a couple of supporting details missing
@@ -368,7 +368,7 @@ def _judge_single(
         You are evaluating predicted evidence extractions for a question, restricted to a single paper.
         You must score the predicted evidence against the ground truth evidence.
 
-        Treat the ground truth as the authoritative answer key. For PRECISION specifically, predicted content that does not align with the ground truth spans is noise — even if it looks topically related to the question. Off-reference content is not "still useful"; it is padding. Be strict.
+        Treat the ground truth as a strong reference for what an ideal extraction looks like, but it is not the only acceptable answer. Predicted spans that genuinely address the question count as relevant even if they don't exactly overlap the ground truth wording — wording differences, alternative phrasings, or nearby supporting sentences from the same paper are fine. Penalize precision only for content that is clearly off-topic or padding, not for being merely different from the reference.
         {paper_line}
         Question: {question}
 
@@ -379,7 +379,7 @@ def _judge_single(
 
         Predicted evidence:
         {pred_block}
-    """) + _RUBRIC_TAIL
+    """) + _RUBRIC_TAIL.format(recall_hint="")
 
     return _call_judge(user_msg, model, base_url)
 
@@ -457,57 +457,66 @@ def judge_reward(
             else:
                 pred_by_paper.setdefault(assigned_pid, []).append(s)
 
-        # Paper-ID F1 gate: if the model didn't select the right papers, skip judging.
-        gt_pid_set = {pid for pid, _ in gt_by_paper}
-        pred_pid_set = {pid for pid, preds in pred_by_paper.items() if preds}
-        if gt_pid_set or pred_pid_set:
-            pid_inter = gt_pid_set & pred_pid_set
-            pid_p = len(pid_inter) / len(pred_pid_set) if pred_pid_set else 0.0
-            pid_r = len(pid_inter) / len(gt_pid_set) if gt_pid_set else 0.0
-            pid_f1 = 2 * pid_p * pid_r / (pid_p + pid_r) if (pid_p + pid_r) > 0 else 0.0
-        else:
-            pid_f1 = 0.0
-        if pid_f1 < 0.6:
-            return 0.0, 0.0, 0.0, {"per_paper": {}, "predicted_paper_ids": []}
-
-        precision_scores: List[int] = []
-        recall_scores: List[int] = []
-        per_paper: Dict[str, Dict[str, float]] = {}
-
+        # Build grouped sections for a single global judge call.
+        sections: List[str] = []
+        seen_pids: set = set()
         for pid, gts in gt_by_paper:
-            preds = pred_by_paper.get(pid, [])
-            if not preds:
-                # GT paper with no predictions: recall = 1/10, no precision contribution.
-                recall_scores.append(1)
-                per_paper[pid] = {"precision": None, "recall": 0.1}
-                continue
+            seen_pids.add(pid)
             title = paper_titles.get(pid, "")
-            header = f"{pid}" + (f" — {title}" if title else "")
-            r = _judge_single(question, gts, preds, header, model, base_url)
-            p_score = int(r.get("precision_score", 0) or 0)
-            r_score = int(r.get("recall_score", 0) or 0)
-            precision_scores.append(p_score)
-            recall_scores.append(r_score)
-            per_paper[pid] = {"precision": p_score / 10.0, "recall": r_score / 10.0}
+            header = f"Paper {pid}" + (f" — {title}" if title else "")
+            preds = pred_by_paper.get(pid, [])
+            gt_block = "\n".join(f"  - {t}" for t in gts) or "  (none)"
+            pred_block = "\n".join(f"  - {t}" for t in preds) or "  (none)"
+            sections.append(f"{header}\nGround truth:\n{gt_block}\nPredicted:\n{pred_block}")
 
         for pid, preds in pred_by_paper.items():
-            if pid in gt_paper_index or not preds:
+            if pid in seen_pids or not preds:
                 continue
-            # Non-GT paper with predictions: precision = 1/10, no recall contribution.
-            precision_scores.append(1)
-            per_paper[pid] = {"precision": 0.1, "recall": None}
+            seen_pids.add(pid)
+            title = paper_titles.get(pid, "")
+            header = f"Paper {pid}" + (f" — {title}" if title else "")
+            pred_block = "\n".join(f"  - {t}" for t in preds)
+            sections.append(f"{header}\nGround truth:\n  (none)\nPredicted:\n{pred_block}")
 
         if unmatched_pred:
-            # Predictions not verbatim in any paper: precision = 0.
-            precision_scores.append(0)
+            pred_block = "\n".join(f"  - {t}" for t in unmatched_pred)
+            sections.append(
+                f"Paper __unmatched__ (predictions not found verbatim in any paper)\n"
+                f"Ground truth:\n  (none)\nPredicted:\n{pred_block}"
+            )
 
+        gt_strings_all: List[str] = [t for _, gts in gt_by_paper for t in gts]
+        gt_chars = sum(len(t) for t in gt_strings_all)
+        pred_chars = sum(len(t) for t in predicted)
+        ratio_note = ""
+        if gt_chars > 0 and pred_chars > 0:
+            ratio = pred_chars / gt_chars
+            ratio_note = f"; predicted is {ratio:.1f}× the size of the ground truth"
+        size_line = f"Sizes — ground truth: {gt_chars} chars total | predicted: {pred_chars} chars total{ratio_note}"
+
+        body = "\n\n".join(sections) if sections else "(no evidence)"
+        user_msg = textwrap.dedent(f"""\
+            You are evaluating predicted evidence extractions for a question across multiple papers.
+            You must score the predicted evidence against the ground truth evidence overall.
+
+            Treat the ground truth as a strong reference for what an ideal extraction looks like, but it is not the only acceptable answer. Predicted spans that genuinely address the question count as relevant even if they don't exactly overlap the ground truth wording — wording differences, alternative phrasings, or nearby supporting sentences from the same paper are fine. Penalize precision only for content that is clearly off-topic or padding, not for being merely different from the reference.
+
+            The evidence is grouped per paper below so you can see which ground-truth and predicted spans belong together. Score the predictions OVERALL across all papers (not per-paper).
+
+            Question: {question}
+
+            {size_line}
+
+            {body}
+        """) + _RUBRIC_TAIL.format(recall_hint="")
+
+        result = _call_judge(user_msg, model, base_url)
+        p_score = int(result.get("precision_score", 0) or 0)
+        r_score = int(result.get("recall_score", 0) or 0)
+        precision = p_score / 10.0
+        recall = r_score / 10.0
         predicted_paper_ids = [pid for pid, preds in pred_by_paper.items() if preds]
-
-        avg_p = sum(precision_scores) / len(precision_scores) if precision_scores else 0.0
-        avg_r = sum(recall_scores) / len(recall_scores) if recall_scores else 0.0
-        precision = avg_p / 10.0
-        recall = avg_r / 10.0
-        extras = {"per_paper": per_paper, "predicted_paper_ids": predicted_paper_ids}
+        extras = {"per_paper": {}, "predicted_paper_ids": predicted_paper_ids}
         return (precision + recall) / 2.0, precision, recall, extras
 
     # Single-paper / no-context fallback: one global judge call.
@@ -516,6 +525,8 @@ def judge_reward(
         gt_strings.extend(sels)
 
     result = _judge_single(question, gt_strings, predicted, None, model, base_url)
-    precision = int(result.get("precision_score", 0) or 0) / 10.0
-    recall = int(result.get("recall_score", 0) or 0) / 10.0
+    p_score = int(result.get("precision_score", 0) or 0)
+    r_score = int(result.get("recall_score", 0) or 0)
+    precision = p_score / 10.0
+    recall = r_score / 10.0
     return (precision + recall) / 2.0, precision, recall, {"per_paper": {}, "predicted_paper_ids": []}

@@ -31,7 +31,6 @@ fi
 : "${TRAIN_GPUS:=8}"
 : "${LOGGER:=wandb}"
 : "${INFERENCE_BACKEND:=vllm}"
-: "${RESUME_PATH:=/home/ssh/weights/curriculum-strict-judge/global_step_200}"
 export RAY_CGRAPH_get_timeout="${RAY_CGRAPH_get_timeout:-900}"
 
 uv run --extra fsdp --python 3.12 -m examples.train.rlm.main_rlm \
@@ -45,8 +44,6 @@ uv run --extra fsdp --python 3.12 -m examples.train.rlm.main_rlm \
   generator.batched=false \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.policy.model.path="alphaXiv/evidence-multi-rlm-sft-4b" \
-  trainer.resume_mode="from_path" \
-  trainer.resume_path="$RESUME_PATH" \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
   trainer.placement.policy_num_gpus_per_node=$TRAIN_GPUS \
@@ -55,6 +52,7 @@ uv run --extra fsdp --python 3.12 -m examples.train.rlm.main_rlm \
   generator.inference_engine.tensor_parallel_size=$TP_SIZE \
   trainer.policy.fsdp_config.wrap_policy.transformer_layer_cls_to_wrap="['Qwen3_5DecoderLayer']" \
   trainer.ref.fsdp_config.wrap_policy.transformer_layer_cls_to_wrap="['Qwen3_5DecoderLayer']" \
+  trainer.resume_mode=none \
   trainer.epochs=5 \
   trainer.eval_before_train=true \
   trainer.eval_interval=10 \

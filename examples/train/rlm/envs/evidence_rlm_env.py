@@ -231,16 +231,25 @@ FINAL_VAR([p1, p2])
 # ---------------------------------------------------------------------------
 
 def _extract_paper_texts(extras: Dict[str, Any]) -> Dict[str, str]:
-    """Extract the {paperId: text} dict from extra_info.context_text, or empty dict."""
+    """Extract the {paperId: text} dict from extra_info.context_text, or empty dict.
+
+    Plain-string context (single-paper datasets) is wrapped under the key
+    ``"__single__"`` so the verbatim short-circuit in ``judge_reward`` fires.
+    """
     raw = (extras.get("extra_info") or {}).get("context_text")
     if not raw:
         return {}
     if isinstance(raw, dict):
         return raw
     try:
-        return json.loads(raw)
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return parsed
     except Exception:
-        return {}
+        pass
+    if isinstance(raw, str):
+        return {"__single__": raw}
+    return {}
 
 
 # ---------------------------------------------------------------------------

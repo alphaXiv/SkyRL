@@ -673,6 +673,13 @@ class RayPPOTrainer:
         training_input.metadata = {"uids": uids}
         if generator_output.get("is_last_step", None) is not None:
             training_input.metadata["is_last_step"] = generator_output["is_last_step"]
+            env_metrics_list = generator_output.get("env_metrics") or []
+            scales = [
+                m.get("_advantage_scale", 1.0) if isinstance(m, dict) else 1.0
+                for m in env_metrics_list
+            ]
+            if any(s != 1.0 for s in scales):
+                training_input.metadata["advantage_scales"] = scales
 
         # 4. Compute mini-batch boundaries for train_critic_and_policy(). It excludes the ones
         # we will add in pad_training_input_batch().
@@ -886,6 +893,13 @@ class RayPPOTrainer:
             ), f"num_traj {num_traj} doesn't match the number of trajectories as given by `is_last_step` {len(last_step_advantages)}. The `is_last_step` tensor is likely malformed"
             response_mask_float = data["response_mask"].to(last_step_advantages.dtype)
             advantages = last_step_advantages[traj_ids] * response_mask_float
+            if "advantage_scales" in data.metadata:
+                raw_scales = data.metadata["advantage_scales"]
+                # metadata list may be shorter than the padded batch; pad to full length with 1.0
+                pad_len = advantages.shape[0] - len(raw_scales)
+                scales_list = raw_scales + [1.0] * pad_len if pad_len > 0 else raw_scales
+                scales_t = torch.tensor(scales_list, dtype=advantages.dtype, device=advantages.device).unsqueeze(1)
+                advantages = advantages * scales_t
             returns = last_step_returns[traj_ids] * response_mask_float
         else:
             advantages, returns = ppo_utils.compute_advantages_and_returns(
