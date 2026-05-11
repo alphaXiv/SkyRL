@@ -293,21 +293,14 @@ class BaseRLMEnv(BaseTextEnv):
         )
         self.repl.add_context(context_payload, context_index=0)
 
-        metadata_text = _format_context_metadata(context_payload)
         system_content = self._build_system_prompt()
 
         self._turn_index = 0
-        turn0_prompt = _build_user_prompt(root_prompt, iteration=0)
 
         init_messages = [
             {"role": "system", "content": system_content},
-            {"role": "user", "content": metadata_text},
-            turn0_prompt,
+            {"role": "user", "content": root_prompt},
         ]
-        # Stash reference — the generator will use this same list object as
-        # chat_history throughout the episode, so we can pop the ephemeral
-        # prompt off it in step().
-        self._chat_history_ref = init_messages
         return init_messages, {}
 
     def _build_system_prompt(self) -> str:
@@ -333,11 +326,6 @@ class BaseRLMEnv(BaseTextEnv):
     def step(self, action: str) -> BaseTextEnvStepOutput:
         self.turns += 1
         self._turn_index += 1
-
-        # Pop the previous turn's ephemeral user prompt from chat_history.
-        # step() runs before the generator appends the new assistant+obs
-        # messages, so the stale prompt is still the last element.
-        self._chat_history_ref.pop()
 
         done = self.turns >= self.max_turns
         code = _find_code_block(action)
@@ -370,16 +358,6 @@ class BaseRLMEnv(BaseTextEnv):
         return self._make_step_output([{"role": "user", "content": obs_text}], done=False)
 
     def _make_step_output(self, observations: List[Dict[str, str]], done: bool) -> BaseTextEnvStepOutput:
-        """Build a step output.
-
-        When not done, appends the next turn's ephemeral user prompt to
-        observations so the generator places it at the tail of chat_history.
-        It will be popped at the start of the next step().
-        """
-        if not done:
-            next_prompt = _build_user_prompt(self._root_prompt, self._turn_index)
-            observations = observations + [next_prompt]
-
         return BaseTextEnvStepOutput(
             observations=observations,
             reward=self._reward if done else 0.0,
