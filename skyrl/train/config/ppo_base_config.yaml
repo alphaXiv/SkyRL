@@ -253,6 +253,7 @@ trainer:
   log_example_interval: 1  # Log example prompt/response every N steps, -1 to disable.
   dump_data_batch: false
   dump_eval_results: true
+  dump_eval_per_turn: false
 
   # YaRN:
   rope_scaling: null

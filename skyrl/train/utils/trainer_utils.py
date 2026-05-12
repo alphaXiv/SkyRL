@@ -247,8 +247,14 @@ def dump_per_dataset_eval_results(
     concat_all_envs: List[str],
     concat_env_extras: List[Dict[str, Any]],
     eval_metrics: Dict[str, float],
+    dump_per_turn: bool = False,
 ):
-    """Dump evaluation results per dataset and overall aggregated results."""
+    """Dump evaluation results per dataset and overall aggregated results.
+
+    When ``dump_per_turn`` is True, also writes one file per (role, turn) pair —
+    ``parent_turn_<N>.jsonl`` / ``child_turn_<N>.jsonl`` — using
+    ``env_metrics["rlm_metadata"]`` (``depth`` and ``step_index``) for routing.
+    """
 
     # Prepare common data
     input_prompts = [tokenizer.decode(prompt) for prompt in concat_generator_outputs["prompt_token_ids"]]
@@ -305,6 +311,43 @@ def dump_per_dataset_eval_results(
         f.write(json.dumps(eval_metrics, ensure_ascii=False) + "\n")
 
     logger.info(f"Dumped aggregated eval metrics to {aggregated_filename}")
+
+    # Optional: per-turn dump, split by role (parent/child) and step_index. One
+    # file per (role, turn). Rows missing rlm_metadata are skipped.
+    if dump_per_turn:
+        from collections import defaultdict
+
+        role_turn_records: Dict[Tuple[str, int], List[Dict[str, Any]]] = defaultdict(list)
+        for i in range(len(input_prompts)):
+            em_i = env_metrics_list[i] if env_metrics_list is not None and i < len(env_metrics_list) else None
+            if not em_i:
+                continue
+            rlm_meta = em_i.get("rlm_metadata")
+            if not rlm_meta:
+                continue
+            depth = rlm_meta.get("depth", 0)
+            step_index = rlm_meta.get("step_index", 0)
+            role = "parent" if depth == 0 else "child"
+            env_extras_clean = {k: v for k, v in concat_env_extras[i].items() if k != "extra_info"}
+            entry = {
+                "input_prompt": input_prompts[i],
+                "output_response": output_responses[i],
+                "stop_reason": concat_generator_outputs.get("stop_reasons", [None] * len(input_prompts))[i],
+                "env_class": concat_all_envs[i],
+                "env_extras": env_extras_clean,
+                "data_source": concat_data_sources[i] if concat_data_sources[i] is not None else "unknown",
+                "env_metrics": em_i,
+            }
+            role_turn_records[(role, step_index)].append(entry)
+
+        for (role, step_index), records in role_turn_records.items():
+            filename = dump_dir_path / f"{role}_turn_{step_index}.jsonl"
+            with open(filename, "w") as f:
+                for r in records:
+                    f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        logger.info(
+            f"Dumped per-turn eval data to {len(role_turn_records)} files under {dump_dir_path}"
+        )
 
 
 class DynamicSamplingState(TypedDict, total=False):

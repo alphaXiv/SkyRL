@@ -43,7 +43,7 @@ uv run --extra fsdp --python 3.12 -m examples.train.rlm.main_rlm \
   generator.max_turns=6 \
   generator.batched=false \
   trainer.algorithm.advantage_estimator="grpo" \
-  trainer.policy.model.path="alphaXiv/entropy-collapse-sft-epoch-4" \
+  trainer.policy.model.path="alphaXiv/evidence-multi-rlm-sft-simplified-4b" \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
   trainer.placement.policy_num_gpus_per_node=$TRAIN_GPUS \
@@ -52,7 +52,8 @@ uv run --extra fsdp --python 3.12 -m examples.train.rlm.main_rlm \
   generator.inference_engine.tensor_parallel_size=$TP_SIZE \
   trainer.policy.fsdp_config.wrap_policy.transformer_layer_cls_to_wrap="['Qwen3_5DecoderLayer']" \
   trainer.ref.fsdp_config.wrap_policy.transformer_layer_cls_to_wrap="['Qwen3_5DecoderLayer']" \
-  trainer.resume_mode=none \
+  trainer.resume_mode=from_path \
+  trainer.resume_path="$(pwd)/.neer/artifacts/ckpts/rlm_ckpt/global_step_75" \
   trainer.epochs=5 \
   trainer.eval_before_train=true \
   trainer.eval_interval=10 \
@@ -62,7 +63,7 @@ uv run --extra fsdp --python 3.12 -m examples.train.rlm.main_rlm \
   trainer.policy_mini_batch_size=4 \
   trainer.micro_forward_batch_size_per_gpu=1 \
   trainer.micro_train_batch_size_per_gpu=1 \
-  trainer.ckpt_interval=100 \
+  trainer.ckpt_interval=25 \
   trainer.use_sample_packing=false \
   trainer.max_prompt_length=32768 \
   generator.sampling_params.max_generate_length=1024 \
@@ -71,7 +72,7 @@ uv run --extra fsdp --python 3.12 -m examples.train.rlm.main_rlm \
   generator.sampling_params.top_p=1.0 \
   trainer.policy.optimizer_config.lr=1.0e-6 \
   trainer.algorithm.use_kl_loss=true \
-  trainer.algorithm.kl_loss_coef=0.01 \
+  trainer.algorithm.kl_loss_coef=0.02 \
   generator.inference_engine.backend=$INFERENCE_BACKEND \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
@@ -89,4 +90,5 @@ uv run --extra fsdp --python 3.12 -m examples.train.rlm.main_rlm \
   trainer.ckpt_path="$(pwd)/.neer/artifacts/ckpts/rlm_ckpt" \
   trainer.export_path="$(pwd)/.neer/artifacts/rlm_exports" \
   trainer.dump_eval_results=true \
+  trainer.dump_eval_per_turn=true \
   "$@"

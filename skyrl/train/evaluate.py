@@ -126,6 +126,7 @@ async def evaluate(
                 concat_all_envs,
                 concat_env_extras,
                 eval_metrics,
+                dump_per_turn=cfg.trainer.dump_eval_per_turn,
             )
 
     return eval_metrics
@@ -271,6 +272,7 @@ async def evaluate_step_wise(
                 concat_all_envs,
                 concat_env_extras,
                 eval_metrics,
+                dump_per_turn=cfg.trainer.dump_eval_per_turn,
             )
 
     return eval_metrics

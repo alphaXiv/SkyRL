@@ -85,16 +85,6 @@ class RLMGymGenerator(SkyRLGymGenerator):
                 "user-prompt injection, output type assertions, child "
                 "trajectory inlining). Non-step-wise mode is not supported."
             )
-        # Patch the Qwen3 chat template so prior-turn `<think>...</think>` blocks
-        # are re-emitted on re-tokenization, matching what was actually sent to
-        # the model on that turn. Without this, step-wise turn N+1's input_ids
-        # diverges from turn N's input_ids + response + obs and prefix-aware
-        # merging breaks.
-        _GATE = "{%- if loop.index0 > ns.last_query_index %}"
-        if self.tokenizer.chat_template and _GATE in self.tokenizer.chat_template:
-            self.tokenizer.chat_template = self.tokenizer.chat_template.replace(
-                _GATE, "{%- if true %}"
-            )
         # Per-rollout registry keyed by rid. Populated in _setup_env_extras /
         # _run_child; the whole subtree is popped in the root's
         # _finalize_episode. _rollout_lock serialises child registration so
